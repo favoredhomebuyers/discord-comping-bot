@@ -1,73 +1,96 @@
-import os
-import discord
-import logging
-import asyncio
+# main.py
 
+import os
+import logging
+import discord
+import asyncio
+from datetime import datetime
 from utils.address_tools import get_coordinates
 from utils.zpid_finder import find_zpid_by_address_async
-from utils.valuation     import get_comp_summary    # ← fixed import!
-
-# ─── Setup logging ──────────────────────────────────────────────────────────────
+from utils.valuation import get_comp_summary    # <-- fixed import!
+  
+# Configure logging
 logging.basicConfig(
     level=logging.DEBUG,
-    format="%(asctime)s %(levelname)8s %(message)s"
+    format="%(asctime)s %(levelname)7s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
-log = logging.getLogger(__name__)
+logger = logging.getLogger()
 
-# ─── Discord client ─────────────────────────────────────────────────────────────
+DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+if not DISCORD_TOKEN:
+    logger.error("DISCORD_BOT_TOKEN not set in environment!")
+    exit(1)
+
 intents = discord.Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
+bot = discord.Client(intents=intents)
 
-@client.event
+@bot.event
 async def on_ready():
-    log.info(f"✅ Bot logged in as {client.user} (ID: {client.user.id})")
-    log.info(f"   Connected to guilds: {[g.name for g in client.guilds]}")
+    logger.info(f"🔑 Bot logged in as {bot.user} (ID: {bot.user.id})")
+    logger.info(f"   Connected to guilds: {[g.name for g in bot.guilds]}")
 
-@client.event
-async def on_message(message: discord.Message):
-    if message.author.id == client.user.id:
+@bot.event
+async def on_message(message):
+    # ignore yourself
+    if message.author.bot:
         return
 
-    log.debug(f"📨 Message from {message.author} in {message.channel}: {message.content!r}")
+    logger.debug(f"📨 Message from {message.author.name} in {message.channel.name}: '''{message.content}'''")
 
-    # Grab first line as the address
-    address = message.content.strip().split("\n")[0]
-    log.info(f"   ↳ parsing address: {address!r}")
+    # parse address = first line
+    lines = message.content.strip().splitlines()
+    if not lines:
+        return
 
+    address = lines[0].strip()
+    logger.info(f"↳ parsing address: '{address}'")
+
+    # fetch comps
     try:
         comps, avg_psf, sqft = await get_comp_summary(address)
-        log.debug(f"   ↳ got comps: {comps}, avg_psf: {avg_psf}, sqft: {sqft}")
-
-        if sqft == 0:
-            reply = (
-                f"⚠️ Could not find square footage for `{address}`.\n"
-                "Please include approximate size in your notes like:\n"
-                "`Notes: Vacant 20 years. Sqft: 1200`"
-            )
-        elif not comps:
-            reply = f"⚠️ No comparable sales found for `{address}` within your criteria."
-        else:
-            lines = [f"🏠 Comps for **{address}** (sqft: {sqft}, avg $/sqft: ${avg_psf:.2f}):"]
-            for comp in comps:
-                lines.append(
-                    f"- {comp['address']} — ${comp['sold_price']} · "
-                    f"{comp['sqft']} sqft · ${comp['psf']}/sqft · Grade {comp['grade']}"
-                )
-            reply = "\n".join(lines)
-
-        log.info(f"   ↳ sending reply:\n{reply}")
-        await message.reply(reply)
-
+        logger.debug(f"    ↳ get_comp_summary -> comps: {comps!r}")
+        logger.debug(f"    ↳ get_comp_summary -> avg_psf: {avg_psf!r}, sqft: {sqft!r}")
     except Exception as e:
-        log.exception("❌ Error handling message")
-        await message.reply(f"❌ An error occurred while processing `{address}`:\n```{e}```")
+        logger.exception("❌ Exception in get_comp_summary")
+        await message.channel.send(f"⚠️ Sorry, I ran into an error fetching comps: `{e}`")
+        return
+
+    # if no sqft, ask user for notes
+    if not sqft:
+        reply = (
+            f"⚠️ Could not find square footage for `{address}`.\n"
+            "Please include approximate size in your notes like:\n"
+            "`Notes: Vacant 20 years. Sqft: 1200`"
+        )
+        logger.info("↳ sending reply: asking for sqft")
+        await message.channel.send(reply)
+        return
+
+    # build a simple embed of the results
+    embed = discord.Embed(
+        title=f"📊 Comps for {address}",
+        description=f"Subject Sqft: **{sqft}** | Avg PSF: **${avg_psf:.2f}**",
+        color=0x00FF00,
+        timestamp=datetime.utcnow(),
+    )
+
+    for comp in comps:
+        embed.add_field(
+            name=f"{comp['address']} ({comp['grade']})",
+            value=(
+                f"${comp['sold_price']:,}  |  "
+                f"{comp['sqft']} sqft  |  "
+                f"{comp['beds']}bd/{comp['baths']}ba  |  "
+                f"[Zillow]({comp['zillow_url']})"
+            ),
+            inline=False,
+        )
+
+    logger.info("↳ sending embed with comps")
+    await message.channel.send(embed=embed)
 
 if __name__ == "__main__":
-    token = os.getenv("DISCORD_BOT_TOKEN")
-    if not token:
-        log.critical("DISCORD_BOT_TOKEN is not set!")
-        exit(1)
-
-    log.info("🔑 Starting bot...")
-    client.run(token)
+    logger.info("🔌 Starting bot…")
+    bot.run(DISCORD_TOKEN)
