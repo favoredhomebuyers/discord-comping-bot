@@ -1,108 +1,80 @@
 import os
-import re
-import asyncio
 import discord
+import logging
+import asyncio
 
 from utils.address_tools import get_coordinates
-from utils.geodata import get_market_info_by_county, ai_extract_county_state
-from utils.valuation import get_comp_summary, get_subject_data
-from pitch_generator import generate_pitch
+from utils.zpid_finder import find_zpid_by_address_async
+from valuation import get_comp_summary  # your updated valuation logic
 
+# ─── Setup basic logging to stdout ─────────────────────────────────────────────
+logging.basicConfig(level=logging.DEBUG,
+                    format='%(asctime)s %(levelname)8s %(message)s')
+log = logging.getLogger(__name__)
+
+# ─── Discord client with message content intent ────────────────────────────────
 intents = discord.Intents.default()
-intents.messages = True
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-def parse_message(content: str) -> tuple[str, str, str, int]:
-    lines = [l.strip() for l in content.splitlines() if l.strip()]
-    addr_line = lines[0] if lines else ""
-    notes_match = re.search(r"Notes:\s*(.*)", content, re.IGNORECASE)
-    notes = notes_match.group(1).strip() if notes_match else ""
-    exit_match = re.search(r"Exit\s*(?:Strategies)?:\s*(.*)", content, re.IGNORECASE)
-    exit_type = exit_match.group(1).strip() if exit_match else ""
-    level_match = re.search(r"Level:\s*(\d+)", content, re.IGNORECASE)
-    level = int(level_match.group(1)) if level_match else 3
-    return addr_line, exit_type, notes, level
-
+# ─── Event: Bot ready ────────────────────────────────────────────────────────────
 @client.event
 async def on_ready():
-    print(f"✅ Underwriting Bot is online as {client.user}")
+    log.info(f"✅ Bot logged in as {client.user} (ID: {client.user.id})")
+    log.info(f"   Connected to guilds: {[g.name for g in client.guilds]}")
 
+# ─── Event: Message received ─────────────────────────────────────────────────────
 @client.event
-async def on_message(message):
-    if message.author == client.user:
+async def on_message(message: discord.Message):
+    # ignore messages from ourselves
+    if message.author.id == client.user.id:
         return
 
-    content = message.content
-    if "exit" not in content.lower() or "notes:" not in content.lower():
+    log.debug(f"📨 Message received from {message.author} in {message.channel}: {message.content!r}")
+
+    # only respond to messages in DMs or a specific prefix or channel
+    if not message.content.strip():
+        log.debug("   ↳ empty message, skipping")
         return
 
-    address, exit_type, notes, level = parse_message(content)
-    exit_type = exit_type or ""
+    # Example: we treat any message as an address request
+    address = message.content.strip().split("\n")[0]
+    log.info(f"   ↳ parsing address: {address!r}")
 
-    lat, lon, city, state, county = get_coordinates(address)
-    if not county or not state:
-        county, state = ai_extract_county_state(address)
+    try:
+        comps, avg_psf, sqft = await get_comp_summary(address)
+        log.debug(f"   ↳ got comps: {comps}, avg_psf: {avg_psf}, sqft: {sqft}")
 
-    market_info = get_market_info_by_county(county, state)
-    market_lines = "\n".join(f"• {k}: {v}" for k, v in market_info.items())
+        if sqft == 0:
+            reply = (
+                f"⚠️ Could not find square footage for `{address}`.\n"
+                "Please include approximate size in your notes like:\n"
+                "`Notes: Vacant 20 years. Sqft: 1200`"
+            )
+        elif not comps:
+            reply = f"⚠️ No comparable sales found for `{address}` within your criteria."
+        else:
+            lines = [f"🏠 Comps for **{address}** (sqft: {sqft}, avg $/sqft: ${avg_psf:.2f}):"]
+            for comp in comps:
+                lines.append(
+                    f"- {comp['address']} — ${comp['sold_price']} · "
+                    f"{comp['sqft']} sqft · ${comp['psf']}/sqft · Grade {comp['grade']}"
+                )
+            reply = "\n".join(lines)
 
-    subj_raw, subject = await get_subject_data(address)
-    subject_sqft = subject.get("sqft") or 0
+        log.info(f"   ↳ sending reply:\n{reply}")
+        await message.reply(reply)
 
-    if not subject_sqft:
-        await message.channel.send(
-            f"⚠️ Could not find square footage for {address}.\n"
-            "Please include approximate size in your notes like:\n"
-            "Notes: Vacant 20 years. Sqft: 1200"
-        )
-        return
+    except Exception as e:
+        log.exception("❌ Error handling message")
+        await message.reply(f"❌ An error occurred while processing `{address}`:\n```{e}```")
 
-    comps, avg_psf, _ = await get_comp_summary(address)
-
-    comps_text = "\n".join(
-        f"• [{c['address']}]({c['zillow_url']}) [{c['grade']}]: "
-        f"${c['sold_price']:,} ({c['sqft']} sqft)"
-        for c in comps
-    ) if comps else "• No comparables found."
-
-    pitch = generate_pitch(notes, exit_type)
-    deals = [d.strip().lower() for d in exit_type.split(",") if d.strip()]
-
-    response  = f"📍 Address: {address}\n"
-    response += f"📝 Notes: {notes}\n"
-    response += f"🔧 Rehab Level: {level}\n"
-    response += f"💼 Exit Strategies: {exit_type}\n\n"
-    response += f"📊 Market Info:\n{market_lines}\n\n"
-    response += f"🏠 Subject Property:\n"
-    response += (
-        f"• {subject.get('beds','?')} bd / {subject.get('baths','?')} ba   "
-        f"{subject_sqft:,} sqft   Built {subject.get('year','?')}\n"
-        f"• Lot: {subject.get('lot','?')}   Garage: {subject.get('garage','N/A')}   "
-        f"Pool: {'Yes' if subject.get('pool') else 'No'}   Stories: {subject.get('stories','?')}\n"
-    )
-
-    arv = avg_psf * subject_sqft if subject_sqft else 0
-    as_is = avg_psf * subject_sqft if subject_sqft else 0
-    repairs = level * subject_sqft
-    fee = 40000
-
-    cash_pct = 0.55 if arv <= 100000 else 0.65 if arv <= 150000 else 0.70 if arv <= 250000 else 0.75 if arv <= 350000 else 0.80 if arv <= 500000 else 0.85
-    cash_offer = arv * cash_pct - repairs - fee
-    rbp_offer = as_is * 0.95 - fee
-    takedown_offer = as_is * 0.95 - 75000
-
-    response += "\n💰 Underwriting Summary:\n"
-    response += f"• As-Is Value: ${as_is:,.0f}\n"
-    response += f"• ARV: ${arv:,.0f}\n"
-    response += f"• Estimated Rehab Cost: ${repairs:,.0f}\n\n"
-    response += f"📉 Offer Ranges by Strategy:\n"
-    response += f"• Cash Max Offer: ${cash_offer:,.0f}\n"
-    response += f"• RBP Max Offer: ${rbp_offer:,.0f}\n"
-    response += f"• Takedown Max Offer: ${takedown_offer:,.0f}\n\n"
-    response += f"🗣 Pitch:\n{pitch}"
-
-    await message.channel.send(response)
-
+# ─── Run the bot ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    asyncio.run(client.start(os.getenv("DISCORD_BOT_TOKEN")))
+    token = os.getenv("DISCORD_BOT_TOKEN")
+    if not token:
+        log.critical("DISCORD_BOT_TOKEN is not set in environment variables!")
+        exit(1)
+
+    log.info("🔑 Starting bot...")
+    client.run(token)
