@@ -2,6 +2,7 @@
 import os
 import asyncio
 import httpx
+import json # <--- IMPORT JSON
 from haversine import haversine, Unit
 from typing import List, Tuple
 from datetime import datetime
@@ -149,14 +150,12 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             break
             
         for comp in comps:
+            # --- THIS IS THE NEW DEBUGGING LINE ---
+            print(f"[RAW COMP]: {json.dumps(comp, indent=2)}")
+            # -------------------------------------
+
             prop_class = comp.get("summary", {}).get("propclass")
             if prop_class and "Single Family" not in prop_class:
-                continue
-
-            # FINAL FIX: Ensure comp has the necessary data to be useful before any other checks.
-            comp_sold = comp.get("price") or comp.get("lastSoldPrice") or (comp.get("sale") or {}).get("amount") or 0
-            comp_sqft = comp.get("livingArea") or (comp.get("building", {}) or {}).get("size", {}).get("livingSize")
-            if not comp_sold or not comp_sqft:
                 continue
 
             if any(c.get("zpid") == comp.get("zpid") for c in chosen if c.get("zpid") and comp.get("zpid")):
@@ -174,8 +173,8 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             if distance > radius:
                 continue
 
-            sqft_tolerance = 500
-            year_tolerance = 25
+            sqft_tolerance = 1000
+            year_tolerance = 35
 
             subject_beds = subject.get("beds")
             comp_beds = comp.get("bedrooms") or comp.get("building", {}).get("rooms", {}).get("beds")
@@ -192,7 +191,8 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             if subject_year and comp_year and abs(comp_year - subject_year) > year_tolerance:
                 continue
             
-            if actual_sqft and abs(comp_sqft - actual_sqft) > sqft_tolerance:
+            comp_sqft = comp.get("livingArea") or (comp.get("building", {}) or {}).get("size", {}).get("livingSize")
+            if actual_sqft and comp_sqft and abs(comp_sqft - actual_sqft) > sqft_tolerance:
                 continue
 
             chosen.append({**comp, "grade": grade, "distance": distance})
@@ -216,7 +216,7 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
         formatted.append({
             "address": comp.get("address", {}).get("streetAddress") or f"{comp.get('address',{}).get('line1')} {comp.get('address',{}).get('line2')}",
             "sold_price": int(sold),
-            "sqft": int(sqft),
+            "sqft": int(sqft) if sqft else None,
             "zillow_url": zillow_url,
             "grade": comp.get("grade"),
             "yearBuilt": comp.get("yearBuilt") or comp.get("summary",{}).get("yearBuilt"),
