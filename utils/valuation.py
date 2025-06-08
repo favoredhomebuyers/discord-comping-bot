@@ -17,43 +17,61 @@ ATTOM_KEY = os.getenv("ATTOM_API_KEY")
 Z_HEADERS = {"x-rapidapi-host": ZILLOW_HOST, "x-rapidapi-key": ZILLOW_KEY}
 A_HEADERS = {"apikey": ATTOM_KEY}
 
-# --- Client for making API calls ---
 client = httpx.AsyncClient(timeout=20.0)
 
-
 async def get_subject_data(address: str) -> Tuple[dict, dict]:
+    """
+    Finds subject property data, using Zillow first and ATTOM as a fallback for details.
+    """
     print(f"[DEBUG VAL] get_subject_data: address={address}")
     zpid = await find_zpid_by_address_async(address)
     subject_info = {}
     subj_ids = {}
 
+    # First, always get coordinates from Google, which are reliable
+    gmaps_info = get_coordinates(address)
+    if gmaps_info:
+        subject_info.update({
+            "latitude": gmaps_info.get("lat"),
+            "longitude": gmaps_info.get("lng"),
+            "address_components": gmaps_info.get("components")
+        })
+    else:
+        print(f"[ERROR VAL] Could not geocode address: {address}. Cannot proceed.")
+        return {}, {}
+
+    # Try to get details from Zillow
     if zpid:
+        subj_ids["zpid"] = zpid
         details = await fetch_property_details(zpid)
         info = details.get("hdpData", {}).get("homeInfo") or details.get("homeInfo") or details
         if info:
-            lat = info.get("latitude") or info.get("latLong", {}).get("latitude")
-            lon = info.get("longitude") or info.get("latLong", {}).get("longitude")
-            subject_info = {
-                "sqft": info.get("livingArea") or info.get("homeSize") or info.get("buildingSize"),
+            subject_info.update({
+                "sqft": info.get("livingArea") or info.get("homeSize"),
                 "beds": info.get("bedrooms"),
                 "baths": info.get("bathrooms"),
                 "year": info.get("yearBuilt"),
                 "lot": info.get("lotSize") or info.get("lotSizeArea"),
-                "latitude": lat,
-                "longitude": lon,
-            }
-            subj_ids["zpid"] = zpid
-    
-    if not subject_info.get("latitude"):
-        gmaps_info = get_coordinates(address)
-        if gmaps_info:
-            subject_info.update({
-                "latitude": gmaps_info.get("lat"),
-                "longitude": gmaps_info.get("lng"),
-                "address_components": gmaps_info.get("components")
             })
-        else:
-             print(f"[WARNING VAL] No ZPID and no geocode for {address}")
+
+    # NEW: If Zillow didn't provide details, use ATTOM as a fallback
+    if not subject_info.get("beds") or not subject_info.get("sqft"):
+        print("[INFO VAL] Zillow details incomplete, trying ATTOM for subject details...")
+        # Make a targeted call for the subject property (tiny radius)
+        attom_details_list = await fetch_attom_comps(subject_info, radius=0.1, count=1)
+        if attom_details_list:
+            attom_details = attom_details_list[0]
+            # Fill in missing details only
+            if not subject_info.get("sqft"):
+                subject_info["sqft"] = attom_details.get("building",{}).get("size",{}).get("livingSize")
+            if not subject_info.get("beds"):
+                subject_info["beds"] = attom_details.get("building", {}).get("rooms", {}).get("beds")
+            if not subject_info.get("baths"):
+                subject_info["baths"] = attom_details.get("building", {}).get("rooms", {}).get("bathTotal")
+            if not subject_info.get("year"):
+                subject_info["year"] = attom_details.get("summary",{}).get("yearBuilt")
+            if not subject_info.get("lot"):
+                subject_info["lot"] = attom_details.get("lot", {}).get("lotSize1")
 
     return subj_ids, subject_info
 
@@ -94,7 +112,7 @@ async def fetch_zillow_comps(zpid: str, count: int = 50) -> List[dict]:
         return []
 
 
-async def fetch_attom_comps(subject: dict, radius: int = 10) -> List[dict]:
+async def fetch_attom_comps(subject: dict, radius: int = 10, count: int = 50) -> List[dict]:
     lat = subject.get("latitude")
     lon = subject.get("longitude")
 
@@ -107,6 +125,7 @@ async def fetch_attom_comps(subject: dict, radius: int = 10) -> List[dict]:
         "latitude": lat,
         "longitude": lon,
         "radius": radius,
+        "pageSize": count, # Correct parameter name for ATTOM is pageSize
     }
     
     try:
@@ -123,7 +142,6 @@ async def fetch_attom_comps(subject: dict, radius: int = 10) -> List[dict]:
 
 
 def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float]:
-    # FINAL FIX: Convert subject coordinates to float and handle errors.
     try:
         s_lat = float(subject.get("latitude"))
         s_lon = float(subject.get("longitude"))
@@ -144,17 +162,16 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             if prop_class and "Single Family" not in prop_class:
                 continue
 
-            if any(c.get("zpid") == comp.get("zpid") for c in chosen if c.get("zpid")):
+            if any(c.get("zpid") == comp.get("zpid") for c in chosen if c.get("zpid") and comp.get("zpid")):
                  continue
-            if any(c.get("id") == comp.get("id") for c in chosen if c.get("id")):
+            if any(c.get("id") == comp.get("id") for c in chosen if c.get("id") and comp.get("id")):
                  continue
 
-            # FINAL FIX: Convert comp coordinates to float and handle errors
             try:
                 lat2 = float(comp.get("latitude") or comp.get("location", {}).get("latitude"))
                 lon2 = float(comp.get("longitude") or comp.get("location", {}).get("longitude"))
             except (ValueError, TypeError):
-                continue # Skip comp if its coordinates are invalid
+                continue
 
             distance = haversine((s_lat, s_lon), (lat2, lon2), unit=Unit.MILES)
             if distance > radius:
@@ -163,16 +180,19 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             sqft_tolerance = 500
             year_tolerance = 25
 
+            subject_beds = subject.get("beds")
             comp_beds = comp.get("bedrooms") or comp.get("building", {}).get("rooms", {}).get("beds")
-            if subject["beds"] and comp_beds and abs(comp_beds - subject["beds"]) > 1:
+            if subject_beds and comp_beds and abs(comp_beds - subject_beds) > 1:
                 continue
 
+            subject_baths = subject.get("baths")
             comp_baths = comp.get("bathrooms") or comp.get("building", {}).get("rooms", {}).get("bathTotal")
-            if subject["baths"] and comp_baths and abs(comp_baths - subject["baths"]) > 1:
+            if subject_baths and comp_baths and abs(comp_baths - subject_baths) > 1:
                 continue
 
+            subject_year = subject.get("year")
             comp_year = comp.get("yearBuilt") or comp.get("summary",{}).get("yearBuilt")
-            if subject["year"] and comp_year and abs(comp_year - subject["year"]) > year_tolerance:
+            if subject_year and comp_year and abs(comp_year - subject_year) > year_tolerance:
                 continue
 
             comp_sqft = comp.get("livingArea") or comp.get("building",{}).get("size",{}).get("livingSize")
@@ -230,8 +250,21 @@ async def get_comp_summary(address: str, manual_sqft: int = None) -> Tuple[List[
     if raw_comps:
         def get_sale_date(comp):
             date_str = (comp.get("sale") or {}).get("saleDate")
-            return datetime.strptime(date_str, "%Y-%m-%d") if date_str else datetime.min
-        
+            if not date_str:
+                return datetime.min
+
+            # Handle different possible date formats gracefully
+            if '+' in date_str:
+                date_str = date_str.split('+')[0]
+            
+            try:
+                if '.' in date_str:
+                    return datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%S.%f")
+                else:
+                    return datetime.strptime(date_str, "%Y-%m-%d")
+            except ValueError:
+                return datetime.min
+
         sorted_comps = sorted(raw_comps, key=get_sale_date, reverse=True)
         clean_comps, avg_psf = get_clean_comps(subject, sorted_comps)
 
