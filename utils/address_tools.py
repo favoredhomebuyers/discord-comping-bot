@@ -1,48 +1,85 @@
 import os
-import googlemaps
-from typing import Optional, Tuple
+import requests
+from typing import Tuple
 
-# Initialize Google Maps client
-GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
-if not GOOGLE_MAPS_API_KEY:
-    raise EnvironmentError("Missing GOOGLE_MAPS_API_KEY")
+# Load your Google Maps API key from environment
+GMAPS_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
-gmaps = googlemaps.Client(key=GOOGLE_MAPS_API_KEY)
 
-def get_coordinates(address: str) -> Tuple[Optional[float], Optional[float], Optional[str], Optional[str], Optional[str]]:
+def get_coordinates(address: str) -> Tuple[float, float, str, str, str]:
     """
-    Geocode and reverse-geocode an address to get coordinates and locality data.
-
-    Returns:
-        (lat, lon, city, state, county)
+    Geocode an address string using Google Maps Geocoding API.
+    Returns a tuple: (latitude, longitude, city, state, postal_code).
     """
-    try:
-        geocode_result = gmaps.geocode(address, region="us")
-        if not geocode_result:
-            print(f"[Geo] ❌ No geolocation found for: {address}")
-            return None, None, None, None, None
+    if not GMAPS_KEY:
+        raise RuntimeError("GOOGLE_MAPS_API_KEY environment variable not set")
 
-        location = geocode_result[0]["geometry"]["location"]
-        lat, lon = location["lat"], location["lng"]
+    url = "https://maps.googleapis.com/maps/api/geocode/json"
+    params = {
+        "address": address,
+        "key": GMAPS_KEY,
+        "region": "us",
+    }
+    resp = requests.get(url, params=params)
+    resp.raise_for_status()
+    data = resp.json()
 
-        rev = gmaps.reverse_geocode(
-            (lat, lon), 
-            result_type=["locality", "administrative_area_level_1", "administrative_area_level_2"]
-        )
+    results = data.get("results")
+    if not results:
+        raise ValueError(f"Geocoding failed for address: {address}")
 
-        city = state = county = None
-        for comp in rev[0]["address_components"]:
-            types = comp.get("types", [])
-            if "locality" in types:
-                city = comp["long_name"]
-            if "administrative_area_level_1" in types:
-                state = comp["short_name"]
-            if "administrative_area_level_2" in types:
-                county = comp["long_name"].replace(" County", "").strip()
+    # Take the first result
+    result = results[0]
+    location = result["geometry"]["location"]
+    lat = location.get("lat")
+    lon = location.get("lng")
 
-        print(f"[Geo] ✅ {address} → ({lat}, {lon}), {city}, {state}, {county}")
-        return lat, lon, city, state, county
+    # Parse address components
+    city = ""
+    state = ""
+    postal_code = ""
+    for comp in result.get("address_components", []):
+        types = comp.get("types", [])
+        if "locality" in types:
+            city = comp.get("long_name")
+        if "administrative_area_level_1" in types:
+            state = comp.get("short_name")
+        if "postal_code" in types:
+            postal_code = comp.get("long_name")
 
-    except Exception as e:
-        print(f"[Geo] ❌ Error geocoding address '{address}': {e}")
-        return None, None, None, None, None
+    return lat, lon, city, state, postal_code
+
+
+def parse_address(message: str) -> Tuple[str, str, str, str]:
+    """
+    Extract street, city, state, and postal code from the first non-empty line
+    of a Discord message or free-form text. Assumes the format:
+        1705 Magnolia Ave, San Bernardino, CA 92411
+    Returns: (street, city, state, postal_code)
+    """
+    # Find first non-blank line
+    first_line = ""
+    for line in message.splitlines():
+        line = line.strip()
+        if line:
+            first_line = line
+            break
+    if not first_line:
+        return "", "", "", ""
+
+    # Split by commas
+    parts = [p.strip() for p in first_line.split(",")]  # e.g. [street, city, "CA 92411"]
+    street = parts[0] if len(parts) > 0 else ""
+    city = parts[1] if len(parts) > 1 else ""
+
+    # Extract state and postal code
+    state = ""
+    postal_code = ""
+    if len(parts) > 2:
+        tail = parts[2].split()
+        if tail:
+            state = tail[0]
+        if len(tail) > 1:
+            postal_code = tail[1]
+
+    return street, city, state, postal_code
