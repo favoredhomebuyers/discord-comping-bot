@@ -92,6 +92,7 @@ async def fetch_attom_comps_fallback(subject: dict, radius: int = 5, count: int 
 
 def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float]:
     if not all(subject.get(k) for k in ["latitude", "longitude", "sqft", "year"]):
+        print(f"[WARNING VAL] Subject property missing key data: {subject}")
         return [], 0.0
 
     s_lat, s_lon, actual_sqft, actual_year = float(subject["latitude"]), float(subject["longitude"]), subject["sqft"], subject["year"]
@@ -99,22 +100,26 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
     
     filtered_comps = []
     for comp_data in comps:
-        prop_details = (comp_data.get("property") or [comp_data])[0]
+        # This handles Zillow's flat structure and Attom's nested structure
+        is_attom = "identifier" in comp_data
+        prop_details = (comp_data.get("property") or [comp_data])[0] if is_attom else comp_data
+
+        # --- Universal Data Parser ---
+        sale_details = comp_data.get("sale", {}).get("amount", {}) if is_attom else prop_details
+        building_details = prop_details.get("building", {})
         
-        sale_date_str = (comp_data.get("sale") or {}).get("amount", {}).get("saleRecDate") or prop_details.get("lastSoldDate")
-        if sale_date_str:
-            try:
-                sale_date = datetime.fromtimestamp(sale_date_str / 1000) if isinstance(sale_date_str, int) else datetime.strptime(sale_date_str, "%Y-%m-%d")
-                if sale_date < one_year_ago: continue
-            except (ValueError, TypeError): continue
-        else: continue
-
-        # FINAL SYNTAX CORRECTION HERE
-        sqft = (prop_details.get("building", {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea")
+        sale_date_str = sale_details.get("saleRecDate") or prop_details.get("lastSoldDate")
+        sold_price = sale_details.get("saleAmt") or prop_details.get("lastSoldPrice")
+        sqft = (building_details.get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea")
         year = (prop_details.get("summary", {}) or {}).get("yearbuilt") or prop_details.get("yearBuilt")
-        sold = (comp_data.get("sale", {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice")
-
-        if not all([sqft, year, sold]): continue
+        
+        # --- Filtering Logic ---
+        if not all([sale_date_str, sold_price, sqft, year]): continue
+            
+        try:
+            sale_date = datetime.fromtimestamp(sale_date_str / 1000) if isinstance(sale_date_str, int) else datetime.strptime(sale_date_str, "%Y-%m-%d")
+            if sale_date < one_year_ago: continue
+        except (ValueError, TypeError): continue
 
         if abs(sqft - actual_sqft) > 400: continue
         if abs(year - actual_year) > 20: continue
@@ -123,25 +128,30 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
 
     if not filtered_comps: return [], 0.0
         
+    # --- Sort by distance and pick the best 3 ---
     def get_distance(comp):
-        prop_details = (comp.get("property") or [comp])[0]
+        prop = (comp.get("property") or [comp])[0]
+        loc = prop.get("location", {})
         try:
-            lat2 = float((prop_details.get("location", {}) or {}).get("latitude"))
-            lon2 = float((prop_details.get("location", {}) or {}).get("longitude"))
-            return haversine((s_lat, s_lon), (lat2, lon2), unit=Unit.MILES)
+            return haversine((s_lat, s_lon), (float(loc.get("latitude")), float(loc.get("longitude"))), unit=Unit.MILES)
         except (ValueError, TypeError): return float('inf')
 
     sorted_by_distance = sorted(filtered_comps, key=get_distance)
     chosen_comps = sorted_by_distance[:3]
 
+    # --- Format the final results ---
     psfs = []
     formatted = []
     for comp in chosen_comps:
-        prop_details = (comp.get("property") or [comp])[0]
-        sold = (comp.get("sale", {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice")
-        sqft = (prop_details.get("building", {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea")
+        is_attom = "identifier" in comp
+        prop_details = (comp.get("property") or [comp])[0] if is_attom else comp
+
+        sale_details = comp.get("sale", {}).get("amount", {}) if is_attom else prop_details
+        building_details = prop_details.get("building", {})
         
-        if not sold or not sqft: continue # Failsafe
+        sold = sale_details.get("saleAmt") or prop_details.get("lastSoldPrice")
+        sqft = (building_details.get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea")
+        
         psf = sold / sqft
         psfs.append(psf)
         
@@ -160,11 +170,11 @@ async def get_comp_summary(address: str, manual_sqft: int = None) -> Tuple[List[
         
     raw_comps = []
     if subj_ids.get("zpid"):
-        raw_comps = await fetch_zillow_comps(subj_ids["zpid"])
+        raw_comps.extend(await fetch_zillow_comps(subj_ids["zpid"]))
             
     if not raw_comps:
         print("[INFO VAL] Zillow returned no comps, trying ATTOM fallback.")
-        raw_comps = await fetch_attom_comps_fallback(subject)
+        raw_comps.extend(await fetch_attom_comps_fallback(subject))
 
     if not raw_comps:
         return [], 0.0, subject.get("sqft") or 0
