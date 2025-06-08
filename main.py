@@ -5,7 +5,7 @@ import discord
 from datetime import datetime
 from utils.address_tools import get_coordinates
 from utils.zpid_finder import find_zpid_by_address_async
-from utils.valuation import get_comp_summary, fetch_zillow_comps, get_clean_comps
+from utils.valuation import get_subject_data, fetch_zillow_comps, get_clean_comps
 
 # ─── Logging ─────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -60,22 +60,16 @@ async def on_message(message: discord.Message):
         except ValueError:
             logger.warning(f"↳ could not parse manual Sqft: {m.group(1)}")
 
-    # 2) Fetch subject via valuation logic (Zillow → Attom fallback)
-    try:
-        comps, avg_psf, sqft = await get_comp_summary(address)
-        logger.debug(f"↳ get_comp_summary → sqft: {sqft}, avg_psf: {avg_psf}, comps: {comps}")
-    except Exception as e:
-        logger.exception("❌ Error in get_comp_summary")
-        await message.channel.send(f"❌ Error fetching property data: `{e}`")
-        return
+    # 2) Fetch core subject data via Zillow (and fallback)
+    subj, subject = await get_subject_data(address)
 
-    # 3) Override sqft if manual provided
+    # 3) Override subject sqft if manual provided
     if manual_sqft is not None:
-        sqft = manual_sqft
-        logger.debug(f"↳ overriding sqft with manual value: {sqft}")
+        subject['sqft'] = manual_sqft
+        logger.debug(f"↳ overriding subject['sqft'] with manual value: {manual_sqft}")
 
     # 4) If still no sqft, ask user to supply it
-    if not sqft:
+    if not subject.get('sqft'):
         reply = (
             f"⚠️ Could not determine square footage for `{address}`.\n"
             "Please include it manually in your message, for example:\n"
@@ -85,19 +79,21 @@ async def on_message(message: discord.Message):
         await message.channel.send(reply)
         return
 
-    # 5) Fetch comps (if you want to bypass get_comp_summary’s comps, you can also do:)
-    #    zpid = subj.get("zpid"); comps_raw = fetch_zillow_comps(zpid) if zpid else []
-    #    clean_comps, avg_psf = get_clean_comps(subject, comps_raw)
-    #    But get_comp_summary already did the comps fetch for you.
+    # 5) Fetch comps list based on ZPID
+    comps_raw = []
+    if subj.get('zpid'):
+        comps_raw = fetch_zillow_comps(subj['zpid'])
+    clean_comps, avg_psf = get_clean_comps(subject, comps_raw)
+    logger.debug(f"↳ clean_comps={clean_comps}, avg_psf={avg_psf}")
 
     # 6) Build and send embed of results
     embed = discord.Embed(
         title=f"📊 Comps for {address}",
-        description=f"Subject Sqft: **{sqft}** | Avg $/sqft: **${avg_psf:.2f}**",
+        description=f"Subject Sqft: **{subject['sqft']}** | Avg $/sqft: **${avg_psf:.2f}**",
         color=0x00FF00,
         timestamp=datetime.utcnow(),
     )
-    for comp in comps:
+    for comp in clean_comps:
         embed.add_field(
             name=f"{comp['address']} ({comp['grade']})",
             value=(
