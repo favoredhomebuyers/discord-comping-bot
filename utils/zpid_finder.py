@@ -1,7 +1,7 @@
 import os
 import logging
 import aiohttp
-from typing import Optional
+from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -16,35 +16,40 @@ HEADERS = {
 
 async def find_zpid_by_address_async(address: str) -> Optional[str]:
     """
-    Given a full address string, query Zillow via RapidAPI to find the property's ZPID.
+    Given a full address string, attempt multiple Zillow RapidAPI endpoints to find the property's ZPID.
     Returns the ZPID as a string, or None if not found.
     """
-    # Endpoint for search results
-    url = f"https://{iZILLOW_HOST}/search"
+    logger.debug(f"[ZPID] Finding ZPID for address: {address}")
     params = {"location": address}
-
-    logger.debug(f"[ZPID] Searching for ZPID: URL={url}, params={params}")
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=HEADERS, params=params) as resp:
-                text = await resp.text()
-                logger.debug(f"[ZPID] Raw response text (first 500 chars): {text[:500]}")
-                data = await resp.json()
-    except Exception as e:
-        logger.exception(f"[ZPID] HTTP error while fetching ZPID for {address}: {e}")
-        return None
-
-    # Attempt to extract ZPID from JSON
     zpid = None
-    try:
-        # Zillow RapidAPI typically returns "props": [...], each has "zpid"
-        props = data.get("props") or data.get("cat1")
-        if isinstance(props, list) and props:
-            # pick the first result
-            first = props[0]
-            zpid = first.get("zpid") or first.get("propertyId")
-        logger.debug(f"[ZPID] Parsed response JSON, extracted zpid={zpid}")
-    except Exception as e:
-        logger.exception(f"[ZPID] Error parsing ZPID JSON for {address}: {e}")
+    # Try various endpoints until one returns a valid JSON payload
+    for ep in ["GetSearchResults", "getSearchResults", "Search", "search"]:
+        url = f"https://{iZILLOW_HOST}/{ep}"
+        logger.debug(f"[ZPID] Trying endpoint '{ep}': URL={url}, params={params}")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=HEADERS, params=params) as resp:
+                    text = await resp.text()
+                    logger.debug(f"[ZPID] {ep} raw response (200 first 200 chars or error message): status={resp.status}, text={text[:200]}")
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+        except Exception as e:
+            logger.exception(f"[ZPID] HTTP error on endpoint '{ep}': {e}")
+            continue
 
+        # Attempt to extract ZPID
+        try:
+            props = data.get("props") or data.get("cat1") or data.get("results")
+            if isinstance(props, list) and props:
+                first = props[0]
+                zpid = first.get("zpid") or first.get("propertyId")
+                logger.debug(f"[ZPID] Parsed zpid='{zpid}' from endpoint '{ep}'")
+                if zpid:
+                    break
+        except Exception as e:
+            logger.exception(f"[ZPID] Error parsing JSON for endpoint '{ep}': {e}")
+
+    if not zpid:
+        logger.warning(f"[ZPID] No ZPID found for address: {address}")
     return zpid
