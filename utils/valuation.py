@@ -20,15 +20,11 @@ A_HEADERS = {"apikey": ATTOM_KEY}
 client = httpx.AsyncClient(timeout=20.0)
 
 async def get_subject_data(address: str) -> Tuple[dict, dict]:
-    """
-    Finds subject property data, using Zillow first and ATTOM as a fallback for details.
-    """
     print(f"[DEBUG VAL] get_subject_data: address={address}")
     zpid = await find_zpid_by_address_async(address)
     subject_info = {}
     subj_ids = {}
 
-    # First, always get coordinates from Google, which are reliable
     gmaps_info = get_coordinates(address)
     if gmaps_info:
         subject_info.update({
@@ -40,7 +36,6 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
         print(f"[ERROR VAL] Could not geocode address: {address}. Cannot proceed.")
         return {}, {}
 
-    # Try to get details from Zillow
     if zpid:
         subj_ids["zpid"] = zpid
         details = await fetch_property_details(zpid)
@@ -54,14 +49,11 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
                 "lot": info.get("lotSize") or info.get("lotSizeArea"),
             })
 
-    # NEW: If Zillow didn't provide details, use ATTOM as a fallback
     if not subject_info.get("beds") or not subject_info.get("sqft"):
         print("[INFO VAL] Zillow details incomplete, trying ATTOM for subject details...")
-        # Make a targeted call for the subject property (tiny radius)
         attom_details_list = await fetch_attom_comps(subject_info, radius=0.1, count=1)
         if attom_details_list:
             attom_details = attom_details_list[0]
-            # Fill in missing details only
             if not subject_info.get("sqft"):
                 subject_info["sqft"] = attom_details.get("building",{}).get("size",{}).get("livingSize")
             if not subject_info.get("beds"):
@@ -117,7 +109,6 @@ async def fetch_attom_comps(subject: dict, radius: int = 10, count: int = 50) ->
     lon = subject.get("longitude")
 
     if not lat or not lon:
-        print(f"[WARNING VAL] ATTOM comps failed: No latitude/longitude for subject property.")
         return []
 
     url = f"https://{ATTOM_HOST}/propertyapi/v1.0.0/property/snapshot"
@@ -125,7 +116,7 @@ async def fetch_attom_comps(subject: dict, radius: int = 10, count: int = 50) ->
         "latitude": lat,
         "longitude": lon,
         "radius": radius,
-        "pageSize": count, # Correct parameter name for ATTOM is pageSize
+        "pageSize": count,
     }
     
     try:
@@ -162,6 +153,12 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             if prop_class and "Single Family" not in prop_class:
                 continue
 
+            # FINAL FIX: Ensure comp has the necessary data to be useful before any other checks.
+            comp_sold = comp.get("price") or comp.get("lastSoldPrice") or (comp.get("sale") or {}).get("amount") or 0
+            comp_sqft = comp.get("livingArea") or (comp.get("building", {}) or {}).get("size", {}).get("livingSize")
+            if not comp_sold or not comp_sqft:
+                continue
+
             if any(c.get("zpid") == comp.get("zpid") for c in chosen if c.get("zpid") and comp.get("zpid")):
                  continue
             if any(c.get("id") == comp.get("id") for c in chosen if c.get("id") and comp.get("id")):
@@ -194,9 +191,8 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             comp_year = comp.get("yearBuilt") or comp.get("summary",{}).get("yearBuilt")
             if subject_year and comp_year and abs(comp_year - subject_year) > year_tolerance:
                 continue
-
-            comp_sqft = comp.get("livingArea") or comp.get("building",{}).get("size",{}).get("livingSize")
-            if actual_sqft and comp_sqft and abs(comp_sqft - actual_sqft) > sqft_tolerance:
+            
+            if actual_sqft and abs(comp_sqft - actual_sqft) > sqft_tolerance:
                 continue
 
             chosen.append({**comp, "grade": grade, "distance": distance})
@@ -207,9 +203,8 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
     psfs = []
     formatted = []
     for comp in sorted(chosen, key=lambda x: x["distance"]):
-        sale_info = comp.get("sale") or {}
-        sold = comp.get("price") or comp.get("lastSoldPrice") or sale_info.get("amount") or 0
-        sqft = comp.get("livingArea") or comp.get("building",{}).get("size",{}).get("livingSize")
+        sold = comp.get("price") or comp.get("lastSoldPrice") or (comp.get("sale") or {}).get("amount") or 0
+        sqft = comp.get("livingArea") or (comp.get("building",{}) or {}).get("size",{}).get("livingSize")
         
         comp_zpid = comp.get('zpid')
         zillow_url = f"https://www.zillow.com/homedetails/{comp_zpid}_zpid/" if comp_zpid else "#"
@@ -221,7 +216,7 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
         formatted.append({
             "address": comp.get("address", {}).get("streetAddress") or f"{comp.get('address',{}).get('line1')} {comp.get('address',{}).get('line2')}",
             "sold_price": int(sold),
-            "sqft": sqft,
+            "sqft": int(sqft),
             "zillow_url": zillow_url,
             "grade": comp.get("grade"),
             "yearBuilt": comp.get("yearBuilt") or comp.get("summary",{}).get("yearBuilt"),
@@ -252,17 +247,14 @@ async def get_comp_summary(address: str, manual_sqft: int = None) -> Tuple[List[
             date_str = (comp.get("sale") or {}).get("saleDate")
             if not date_str:
                 return datetime.min
-
-            # Handle different possible date formats gracefully
             if '+' in date_str:
                 date_str = date_str.split('+')[0]
-            
             try:
                 if '.' in date_str:
                     return datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%S.%f")
                 else:
                     return datetime.strptime(date_str, "%Y-%m-%d")
-            except ValueError:
+            except (ValueError, TypeError):
                 return datetime.min
 
         sorted_comps = sorted(raw_comps, key=get_sale_date, reverse=True)
