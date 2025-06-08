@@ -8,10 +8,15 @@ ZILLOW_HOST = os.getenv("ZILLOW_RAPIDAPI_HOST", "zillow-com1.p.rapidapi.com")
 ZILLOW_KEY = os.getenv("ZILLOW_RAPIDAPI_KEY")
 HEADERS = {"x-rapidapi-host": ZILLOW_HOST, "x-rapidapi-key": ZILLOW_KEY}
 
-# Ordered list of RapidAPI endpoints to try
+# ... (imports and constants are fine) ...
+
+# Ordered list of RapidAPI endpoints to try - UPDATED
 SEARCH_ENDPOINTS = [
-    "GetSearchResults", "getSearchResults", "Search", "search"
+    "propertyExtendedSearch",
+    "property"
 ]
+
+# ... (the rest of the file is fine) ...
 
 async def find_zpid_by_address_async(address: str) -> Optional[str]:
     """
