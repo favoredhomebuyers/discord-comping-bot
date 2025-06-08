@@ -31,12 +31,24 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
     print("[DEBUG] Raw Zillow Details:", details)
 
     info = details.get("hdpData", {}).get("homeInfo") or details.get("homeInfo") or details
+    print("[DEBUG] Full home info dict for debugging:", info)
 
     lat = info.get("latitude") or info.get("latLong", {}).get("latitude")
     lon = info.get("longitude") or info.get("latLong", {}).get("longitude")
 
+    # Expanded list of keys to catch more possible square footage fields
+    sqft = (
+        info.get("livingArea")
+        or info.get("homeSize")
+        or info.get("buildingSize")
+        or info.get("finishedSqFt")
+        or info.get("propertySize")
+        or info.get("totalSqFt")
+        or info.get("area")
+    )
+
     subject_info = {
-        "sqft": info.get("livingArea") or info.get("homeSize") or info.get("buildingSize"),
+        "sqft": sqft,
         "beds": info.get("bedrooms"),
         "baths": info.get("bathrooms"),
         "year": info.get("yearBuilt"),
