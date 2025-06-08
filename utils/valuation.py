@@ -2,7 +2,6 @@
 import os
 import asyncio
 import httpx
-import json # <--- IMPORT JSON
 from haversine import haversine, Unit
 from typing import List, Tuple
 from datetime import datetime
@@ -74,11 +73,9 @@ async def fetch_property_details(zpid: str) -> dict:
     try:
         resp = await client.get(url, headers=Z_HEADERS, params={"zpid": zpid})
         if resp.status_code != 200:
-            print(f"[WARNING VAL] Failed to fetch details for ZPID: {zpid}")
             return {}
         return resp.json()
-    except httpx.RequestError as e:
-        print(f"[ERROR VAL] HTTP error fetching details for ZPID {zpid}: {e}")
+    except httpx.RequestError:
         return {}
 
 
@@ -86,22 +83,19 @@ async def fetch_zillow_comps(zpid: str, count: int = 50) -> List[dict]:
     details = await fetch_property_details(zpid)
     nearby = details.get("nearbyHomes")
     if isinstance(nearby, list) and nearby:
-        print(f"[DEBUG VAL] Using {len(nearby)} nearbyHomes from Zillow details")
         return nearby[:count]
     
     url = f"https://{ZILLOW_HOST}/propertyComps"
     try:
         resp = await client.get(url, headers=Z_HEADERS, params={"zpid": zpid, "count": count})
         if resp.status_code != 200:
-            print(f"[WARNING VAL] Failed to fetch comps for ZPID: {zpid}")
             return []
         data = resp.json()
         for key in ("compResults", "comps", "comparables", "results"):
             if isinstance(data, dict) and key in data and isinstance(data[key], list):
                 return data[key]
         return []
-    except httpx.RequestError as e:
-        print(f"[ERROR VAL] HTTP error fetching comps for ZPID {zpid}: {e}")
+    except httpx.RequestError:
         return []
 
 
@@ -113,23 +107,15 @@ async def fetch_attom_comps(subject: dict, radius: int = 10, count: int = 50) ->
         return []
 
     url = f"https://{ATTOM_HOST}/propertyapi/v1.0.0/property/snapshot"
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "radius": radius,
-        "pageSize": count,
-    }
+    params = {"latitude": lat, "longitude": lon, "radius": radius, "pageSize": count}
     
     try:
-        print(f"[DEBUG VAL] Querying ATTOM with params: {params}")
         resp = await client.get(url, headers=A_HEADERS, params=params)
         if resp.status_code != 200:
-            print(f"[WARNING VAL] ATTOM comps failed: {resp.status_code} - {resp.text}")
             return []
         data = resp.json()
         return data.get("property") or []
-    except httpx.RequestError as e:
-        print(f"[ERROR VAL] HTTP error fetching ATTOM comps: {e}")
+    except httpx.RequestError:
         return []
 
 
@@ -138,7 +124,6 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
         s_lat = float(subject.get("latitude"))
         s_lon = float(subject.get("longitude"))
     except (ValueError, TypeError):
-        print("[ERROR VAL] Subject property has invalid coordinates.")
         return [], 0.0
 
     actual_sqft = subject.get("sqft")
@@ -150,11 +135,14 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             break
             
         for comp in comps:
-            # --- THIS IS THE NEW DEBUGGING LINE ---
-            print(f"[RAW COMP]: {json.dumps(comp, indent=2)}")
-            # -------------------------------------
+            # CORRECTED PARSING LOGIC
+            comp_sold = comp.get("lastSoldPrice") or (comp.get("sale") or {}).get("amount")
+            comp_sqft = comp.get("livingArea") or (comp.get("building", {}).get("size", {}) or {}).get("livingSize")
 
-            prop_class = comp.get("summary", {}).get("propclass")
+            if not comp_sold or not comp_sqft:
+                continue
+
+            prop_class = (comp.get("summary", {}) or {}).get("propclass")
             if prop_class and "Single Family" not in prop_class:
                 continue
 
@@ -164,8 +152,8 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
                  continue
 
             try:
-                lat2 = float(comp.get("latitude") or comp.get("location", {}).get("latitude"))
-                lon2 = float(comp.get("longitude") or comp.get("location", {}).get("longitude"))
+                lat2 = float(comp.get("latitude") or (comp.get("location", {}) or {}).get("latitude"))
+                lon2 = float(comp.get("longitude") or (comp.get("location", {}) or {}).get("longitude"))
             except (ValueError, TypeError):
                 continue
 
@@ -173,26 +161,25 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             if distance > radius:
                 continue
 
-            sqft_tolerance = 1000
-            year_tolerance = 35
+            sqft_tolerance = 750 # Loosened for better matching
+            year_tolerance = 30 # Loosened for better matching
 
             subject_beds = subject.get("beds")
-            comp_beds = comp.get("bedrooms") or comp.get("building", {}).get("rooms", {}).get("beds")
+            comp_beds = comp.get("bedrooms") or (comp.get("building", {}).get("rooms", {}) or {}).get("beds")
             if subject_beds and comp_beds and abs(comp_beds - subject_beds) > 1:
                 continue
 
             subject_baths = subject.get("baths")
-            comp_baths = comp.get("bathrooms") or comp.get("building", {}).get("rooms", {}).get("bathTotal")
+            comp_baths = comp.get("bathrooms") or (comp.get("building", {}).get("rooms", {}) or {}).get("bathTotal")
             if subject_baths and comp_baths and abs(comp_baths - subject_baths) > 1:
                 continue
 
             subject_year = subject.get("year")
-            comp_year = comp.get("yearBuilt") or comp.get("summary",{}).get("yearBuilt")
+            comp_year = comp.get("yearBuilt") or (comp.get("summary",{}) or {}).get("yearBuilt")
             if subject_year and comp_year and abs(comp_year - subject_year) > year_tolerance:
                 continue
             
-            comp_sqft = comp.get("livingArea") or (comp.get("building", {}) or {}).get("size", {}).get("livingSize")
-            if actual_sqft and comp_sqft and abs(comp_sqft - actual_sqft) > sqft_tolerance:
+            if actual_sqft and abs(comp_sqft - actual_sqft) > sqft_tolerance:
                 continue
 
             chosen.append({**comp, "grade": grade, "distance": distance})
@@ -203,8 +190,9 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
     psfs = []
     formatted = []
     for comp in sorted(chosen, key=lambda x: x["distance"]):
-        sold = comp.get("price") or comp.get("lastSoldPrice") or (comp.get("sale") or {}).get("amount") or 0
-        sqft = comp.get("livingArea") or (comp.get("building",{}) or {}).get("size",{}).get("livingSize")
+        # CORRECTED PARSING LOGIC
+        sold = comp.get("lastSoldPrice") or (comp.get("sale") or {}).get("amount")
+        sqft = comp.get("livingArea") or (comp.get("building",{}).get("size",{}) or {}).get("livingSize")
         
         comp_zpid = comp.get('zpid')
         zillow_url = f"https://www.zillow.com/homedetails/{comp_zpid}_zpid/" if comp_zpid else "#"
@@ -213,15 +201,17 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
         if psf:
             psfs.append(psf)
             
+        comp_address = comp.get("address", {})
+        
         formatted.append({
-            "address": comp.get("address", {}).get("streetAddress") or f"{comp.get('address',{}).get('line1')} {comp.get('address',{}).get('line2')}",
+            "address": comp_address.get("streetAddress") or f"{comp_address.get('line1')} {comp_address.get('line2')}",
             "sold_price": int(sold),
-            "sqft": int(sqft) if sqft else None,
+            "sqft": int(sqft),
             "zillow_url": zillow_url,
             "grade": comp.get("grade"),
-            "yearBuilt": comp.get("yearBuilt") or comp.get("summary",{}).get("yearBuilt"),
-            "beds": comp.get("bedrooms") or comp.get("building", {}).get("rooms", {}).get("beds"),
-            "baths": comp.get("bathrooms") or comp.get("building", {}).get("rooms", {}).get("bathTotal"),
+            "yearBuilt": comp.get("yearBuilt") or (comp.get("summary",{}) or {}).get("yearBuilt"),
+            "beds": comp.get("bedrooms") or (comp.get("building", {}).get("rooms", {}) or {}).get("beds"),
+            "baths": comp.get("bathrooms") or (comp.get("building", {}).get("rooms", {}) or {}).get("bathTotal"),
             "psf": round(psf, 2) if psf else None,
         })
         
@@ -244,9 +234,12 @@ async def get_comp_summary(address: str, manual_sqft: int = None) -> Tuple[List[
 
     if raw_comps:
         def get_sale_date(comp):
-            date_str = (comp.get("sale") or {}).get("saleDate")
+            date_str = (comp.get("sale") or {}).get("saleDate") or comp.get("lastSoldDate")
             if not date_str:
                 return datetime.min
+            # Zillow returns milliseconds, Attom does not. Handle both.
+            if isinstance(date_str, int):
+                return datetime.fromtimestamp(date_str / 1000)
             if '+' in date_str:
                 date_str = date_str.split('+')[0]
             try:
@@ -260,4 +253,17 @@ async def get_comp_summary(address: str, manual_sqft: int = None) -> Tuple[List[
         sorted_comps = sorted(raw_comps, key=get_sale_date, reverse=True)
         clean_comps, avg_psf = get_clean_comps(subject, sorted_comps)
 
-    return clean_comps, avg_psf, subject.get("sqft") or 0
+    # Make sure we have subject sqft for the final return value
+    final_sqft = subject.get("sqft")
+    if not final_sqft and clean_comps:
+       # A fallback if subject sqft is still missing
+       try:
+           s_lat = float(subject.get("latitude"))
+           s_lon = float(subject.get("longitude"))
+           # Find the closest comp and steal its sqft - not ideal, but better than nothing
+           closest_comp = min(clean_comps, key=lambda c: haversine((s_lat, s_lon), (float(c.get('latitude',0)), float(c.get('longitude',0)))))
+           final_sqft = closest_comp.get('sqft')
+       except (ValueError, TypeError):
+           final_sqft = None
+           
+    return clean_comps, avg_psf, final_sqft or 0
