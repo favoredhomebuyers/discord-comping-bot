@@ -34,7 +34,6 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
     else:
         return {}, {}
 
-    # Try to get details from Zillow first
     if zpid:
         subj_ids["zpid"] = zpid
         details = await fetch_property_details(zpid)
@@ -45,21 +44,7 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
                 "baths": details.get("bathrooms"),
                 "year": details.get("yearBuilt"),
             })
-    
-    # If Zillow fails to provide key details, use Attom as a fallback
-    if not all(subject_info.get(k) for k in ["sqft", "beds", "baths", "year"]):
-        print("[INFO VAL] Zillow details incomplete, using ATTOM fallback for subject property...")
-        attom_subject_list = await fetch_attom_comps_fallback(subject_info, radius=0.1)
-        if attom_subject_list:
-            # The data is nested, so we need to go one level deeper
-            prop_details = (attom_subject_list[0].get("property") or [{}])[0]
-            if prop_details:
-                # Fill in any missing details
-                if not subject_info.get("sqft"): subject_info["sqft"] = (prop_details.get("building", {}).get("size", {}) or {}).get("livingsize")
-                if not subject_info.get("beds"): subject_info["beds"] = (prop_details.get("building", {}).get("rooms", {}) or {}).get("beds")
-                if not subject_info.get("baths"): subject_info["baths"] = (prop_details.get("building", {}).get("rooms", {}) or {}).get("bathstotal")
-                if not subject_info.get("year"): subject_info["year"] = (prop_details.get("summary", {}) or {}).get("yearbuilt")
-
+            
     return subj_ids, subject_info
 
 async def fetch_property_details(zpid: str) -> dict:
@@ -68,6 +53,7 @@ async def fetch_property_details(zpid: str) -> dict:
         resp = await client.get(url, headers=Z_HEADERS, params={"zpid": zpid})
         return resp.json() if resp.status_code == 200 else {}
     except httpx.RequestError: return {}
+
 
 async def fetch_zillow_comps(zpid: str) -> List[dict]:
     details = await fetch_property_details(zpid)
@@ -94,67 +80,38 @@ async def fetch_attom_comps_fallback(subject: dict, radius: int = 5, count: int 
         return []
 
 def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float]:
-    actual_sqft = subject.get("sqft")
-    actual_year = subject.get("year")
-    one_year_ago = datetime.now() - timedelta(days=365)
-    
-    if not actual_sqft or not actual_year:
-        print("[WARNING VAL] Subject property missing sqft or year, cannot filter comps.")
+    """
+    DEBUGGING VERSION: This function is now simplified. It takes the first 3 comps
+    from the raw list without applying any filters.
+    """
+    chosen_comps = comps[:3] # Take the first 3 properties from the raw list
+
+    if not chosen_comps:
         return [], 0.0
-
-    filtered_comps = []
-    for comp_data in comps:
-        prop_details = (comp_data.get("property") or [comp_data])[0]
-        
-        sale_date_str = (comp_data.get("sale") or {}).get("saleAmountData", {}).get("saleRecDate") or prop_details.get("lastSoldDate")
-        if sale_date_str:
-            try:
-                sale_date = datetime.fromtimestamp(sale_date_str / 1000) if isinstance(sale_date_str, int) else datetime.strptime(sale_date_str, "%Y-%m-%d")
-                if sale_date < one_year_ago: continue
-            except (ValueError, TypeError): pass
-        else: continue
-
-        sqft = (prop_details.get("building", {}).get("size", {}) or {}).get("livingsize") or prop_details.get("livingArea")
-        if not sqft or abs(sqft - actual_sqft) > 400:
-            continue
-
-        year = (prop_details.get("summary", {}) or {}).get("yearbuilt") or prop_details.get("yearBuilt")
-        if not year or abs(year - actual_year) > 20:
-            continue
-        
-        filtered_comps.append(comp_data)
-
-    if not filtered_comps:
-        return [], 0.0
-        
-    s_lat = float(subject.get("latitude"))
-    s_lon = float(subject.get("longitude"))
-    
-    def get_distance(comp):
-        prop_details = (comp.get("property") or [comp])[0]
-        try:
-            lat2 = float((prop_details.get("location", {}) or {}).get("latitude"))
-            lon2 = float((prop_details.get("location", {}) or {}).get("longitude"))
-            return haversine((s_lat, s_lon), (lat2, lon2), unit=Unit.MILES)
-        except (ValueError, TypeError): return float('inf')
-
-    sorted_by_distance = sorted(filtered_comps, key=get_distance)
-    chosen_comps = sorted_by_distance[:3]
 
     psfs = []
     formatted = []
-    for comp in chosen_comps:
-        prop_details = (comp.get("property") or [comp])[0]
-        sold = (comp.get("sale", {}).get("saleAmountData", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice")
-        sqft = (prop_details.get("building", {}) or {}).get("size", {}).get("livingsize") or prop_details.get("livingArea")
+    for comp_data in chosen_comps:
+        prop_details = (comp_data.get("property") or [comp_data])[0]
+
+        sold = prop_details.get("lastSoldPrice") or (comp_data.get("sale", {}).get("amount", {}) or {}).get("saleAmt")
+        sqft = prop_details.get("livingArea") or (prop_details.get("building", {}).get("size", {}) or {}).get("livingsize")
         
-        psf = sold / sqft if sold and sqft else 0
+        # We still need to handle cases where price/sqft might be missing in the raw data
+        if not sold or not sqft:
+            continue
+
+        psf = sold / sqft
         psfs.append(psf)
         
         comp_address = prop_details.get("address", {})
+        
         formatted.append({
-            "address": comp_address.get("oneLine") or prop_details.get("streetAddress"),
-            "sold_price": int(sold), "sqft": int(sqft), "psf": round(psf, 2),
+            "address": comp_address.get("oneLine") or prop_details.get("streetAddress", "Address not found"),
+            "sold_price": int(sold), 
+            "sqft": int(sqft), 
+            "psf": round(psf, 2),
+            "grade": "N/A" # No grade since we aren't filtering by distance
         })
         
     avg_psf = sum(psfs) / len(psfs) if psfs else 0
