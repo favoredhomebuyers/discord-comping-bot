@@ -4,6 +4,7 @@ import asyncio
 import httpx
 from haversine import haversine, Unit
 from typing import List, Tuple
+from datetime import datetime
 from utils.address_tools import get_coordinates
 from utils.zpid_finder import find_zpid_by_address_async
 
@@ -26,7 +27,6 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
     subject_info = {}
     subj_ids = {}
 
-    # Try fetching details from Zillow first
     if zpid:
         details = await fetch_property_details(zpid)
         info = details.get("hdpData", {}).get("homeInfo") or details.get("homeInfo") or details
@@ -44,7 +44,6 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
             }
             subj_ids["zpid"] = zpid
     
-    # If Zillow fails or doesn't have coordinates, use Google Maps
     if not subject_info.get("latitude"):
         gmaps_info = get_coordinates(address)
         if gmaps_info:
@@ -73,14 +72,12 @@ async def fetch_property_details(zpid: str) -> dict:
 
 
 async def fetch_zillow_comps(zpid: str, count: int = 50) -> List[dict]:
-    # First try comps embedded in the property details
     details = await fetch_property_details(zpid)
     nearby = details.get("nearbyHomes")
     if isinstance(nearby, list) and nearby:
         print(f"[DEBUG VAL] Using {len(nearby)} nearbyHomes from Zillow details")
         return nearby[:count]
     
-    # Fallback to propertyComps endpoint
     url = f"https://{ZILLOW_HOST}/propertyComps"
     try:
         resp = await client.get(url, headers=Z_HEADERS, params={"zpid": zpid, "count": count})
@@ -97,11 +94,9 @@ async def fetch_zillow_comps(zpid: str, count: int = 50) -> List[dict]:
         return []
 
 
-# ... (keep all other functions as they were from the previous step) ...
-
-async def fetch_attom_comps(subject: dict, radius: int = 10, count: int = 50) -> List[dict]:
+async def fetch_attom_comps(subject: dict, radius: int = 10) -> List[dict]:
     """
-    Fetches comps from ATTOM using latitude and longitude for better reliability.
+    Fetches comps from ATTOM using only the valid parameters: latitude, longitude, and radius.
     """
     lat = subject.get("latitude")
     lon = subject.get("longitude")
@@ -111,13 +106,11 @@ async def fetch_attom_comps(subject: dict, radius: int = 10, count: int = 50) ->
         return []
 
     url = f"https://{ATTOM_HOST}/propertyapi/v1.0.0/property/snapshot"
+    # CORRECTED: Only send parameters the API endpoint supports.
     params = {
         "latitude": lat,
         "longitude": lon,
         "radius": radius,
-        "size": count,
-        "propertytype": "SFR",
-        "orderby": "saledate"
     }
     
     try:
@@ -132,29 +125,23 @@ async def fetch_attom_comps(subject: dict, radius: int = 10, count: int = 50) ->
         print(f"[ERROR VAL] HTTP error fetching ATTOM comps: {e}")
         return []
 
-# ... (ensure the other functions like get_comp_summary and get_clean_comps are present) ...
-
 
 def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float]:
-    """
-    Filters a list of raw comps based on a tiered distance system, seeking 3 good comps.
-    Starts with the tightest radius and expands if necessary.
-    """
     lat, lon = subject.get("latitude"), subject.get("longitude")
     actual_sqft = subject.get("sqft")
-
-    # Define the tiered search system as requested
     tiers = [(1, "A+"), (2, "B+"), (3, "C+"), (5, "D+"), (10, "F")]
-    
     chosen = []
     
     for radius, grade in tiers:
-        # If we already have 3 comps, we can stop searching
         if len(chosen) >= 3:
             break
             
         for comp in comps:
-            # Skip if we already added this comp
+            # CORRECTED: Filter for Single Family Residence here instead of in the API call
+            prop_class = comp.get("summary", {}).get("propclass")
+            if prop_class and "Single Family" not in prop_class:
+                continue
+
             if any(c.get("zpid") == comp.get("zpid") for c in chosen if c.get("zpid")):
                  continue
             if any(c.get("id") == comp.get("id") for c in chosen if c.get("id")):
@@ -163,18 +150,15 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             lat2 = comp.get("latitude") or comp.get("location", {}).get("latitude")
             lon2 = comp.get("longitude") or comp.get("location", {}).get("longitude")
 
-            # Ensure the comp has coordinates to check distance
             if not all([lat, lon, lat2, lon2]):
                 continue
             
-            # Check if comp is within the current tier's radius
             distance = haversine((lat, lon), (lat2, lon2), unit=Unit.MILES)
             if distance > radius:
                 continue
 
-            # --- Apply Property Similarity Filters ---
-            sqft_tolerance = 500  # A looser, more realistic tolerance
-            year_tolerance = 25   # A looser, more realistic tolerance
+            sqft_tolerance = 500
+            year_tolerance = 25
 
             comp_beds = comp.get("bedrooms") or comp.get("building", {}).get("rooms", {}).get("beds")
             if subject["beds"] and comp_beds and abs(comp_beds - subject["beds"]) > 1:
@@ -192,21 +176,18 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             if actual_sqft and comp_sqft and abs(comp_sqft - actual_sqft) > sqft_tolerance:
                 continue
 
-            # If all checks pass, add it to our list with the correct grade
             chosen.append({**comp, "grade": grade, "distance": distance})
             
-            # If we hit 3 comps, break the inner loop and move to formatting
             if len(chosen) >= 3:
                 break
     
-    # --- Format the chosen comps for the final output ---
     psfs = []
     formatted = []
     for comp in sorted(chosen, key=lambda x: x["distance"]):
-        sold = comp.get("price") or comp.get("lastSoldPrice") or comp.get("sale", {}).get("amount") or 0
+        sale_info = comp.get("sale") or {}
+        sold = comp.get("price") or comp.get("lastSoldPrice") or sale_info.get("amount") or 0
         sqft = comp.get("livingArea") or comp.get("building",{}).get("size",{}).get("livingSize")
         
-        # zpid can come from multiple places
         comp_zpid = comp.get('zpid')
         zillow_url = f"https://www.zillow.com/homedetails/{comp_zpid}_zpid/" if comp_zpid else "#"
 
@@ -238,15 +219,18 @@ async def get_comp_summary(address: str, manual_sqft: int = None) -> Tuple[List[
     clean_comps, avg_psf = [], 0.0
     raw_comps = []
     
-    # Try Zillow first
     if subj_ids.get("zpid"):
         raw_comps.extend(await fetch_zillow_comps(subj_ids["zpid"]))
             
-    # Always try Attom as a backup or to supplement Zillow
     raw_comps.extend(await fetch_attom_comps(subject))
 
     if raw_comps:
-        # Send all raw comps to the tiered filter
-        clean_comps, avg_psf = get_clean_comps(subject, raw_comps)
+        # CORRECTED: Sort all comps by sale date (newest first) before filtering
+        def get_sale_date(comp):
+            date_str = (comp.get("sale") or {}).get("saleDate")
+            return datetime.strptime(date_str, "%Y-%m-%d") if date_str else datetime.min
+        
+        sorted_comps = sorted(raw_comps, key=get_sale_date, reverse=True)
+        clean_comps, avg_psf = get_clean_comps(subject, sorted_comps)
 
     return clean_comps, avg_psf, subject.get("sqft") or 0
