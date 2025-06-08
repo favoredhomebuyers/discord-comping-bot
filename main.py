@@ -86,7 +86,13 @@ async def on_message(message: discord.Message):
     clean_comps, avg_psf = get_clean_comps(subject, comps_raw)
     logger.debug(f"↳ clean_comps={clean_comps}, avg_psf={avg_psf}")
 
-    # 6) Build and send embed of results
+    # 6) If no comps found, tell the user and exit
+    if not clean_comps:
+        logger.info(f"↳ no comps found for {address}")
+        await message.channel.send(f"⚠️ No comparable sales found for `{address}`.")
+        return
+
+    # 7) Build and send embed of results
     embed = discord.Embed(
         title=f"📊 Comps for {address}",
         description=f"Subject Sqft: **{subject['sqft']}** | Avg $/sqft: **${avg_psf:.2f}**",
@@ -107,8 +113,3 @@ async def on_message(message: discord.Message):
 
     logger.info("↳ sending comps embed")
     await message.channel.send(embed=embed)
-
-# ─── Run ─────────────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    logger.info("🔌 Starting bot…")
-    bot.run(DISCORD_TOKEN)
