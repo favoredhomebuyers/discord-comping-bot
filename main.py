@@ -90,7 +90,7 @@ async def on_message(message: discord.Message):
     )
 
     for c in comps:
-        main_content += f"• **{c['address']} [{c['grade']}]**: ${c['sold_price']:,} (${c['psf']}/sqft)\n"
+        main_content += f"• **{c['address']}**: ${c['sold_price']:,} (${c['psf']}/sqft)\n"
 
     main_content += (
         f"\n**Deal Breakdowns:**\n"
@@ -123,7 +123,7 @@ async def on_message(message: discord.Message):
 
 
 if __name__ == "__main__":
-    if not os.getenv("DISCORD_TOKEN"):
+    if not DISCORD_TOKEN:
         logger.error("DISCORD_TOKEN is not set!")
         exit(1)
     
@@ -134,8 +134,7 @@ if __name__ == "__main__":
         logger.error("ZILLOW_RAPIDAPI_KEY is not set!")
     if not os.getenv("ATTOM_API_KEY"):
         logger.error("ATTOM_API_KEY is not set!")
-    # THIS LINE IS NOW CORRECTED:
-    if not os.getenv("GOOGLE_MAPS_API_KEY"):
-        logger.error("GOOGLE_MAPS_API_KEY is not set!")
+    if not os.getenv("Maps_API_KEY"):
+        logger.error("Maps_API_KEY is not set!")
 
     bot.run(DISCORD_TOKEN)
