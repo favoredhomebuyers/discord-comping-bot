@@ -44,6 +44,7 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
                 "baths": details.get("bathrooms"),
                 "year": details.get("yearBuilt"),
             })
+            
     return subj_ids, subject_info
 
 async def fetch_property_details(zpid: str) -> dict:
@@ -51,8 +52,8 @@ async def fetch_property_details(zpid: str) -> dict:
     try:
         resp = await client.get(url, headers=Z_HEADERS, params={"zpid": zpid})
         return resp.json() if resp.status_code == 200 else {}
-    except httpx.RequestError:
-        return {}
+    except httpx.RequestError: return {}
+
 
 async def fetch_zillow_comps(zpid: str) -> List[dict]:
     details = await fetch_property_details(zpid)
@@ -66,7 +67,13 @@ async def fetch_attom_comps_fallback(subject: dict, radius: int = 5, count: int 
     if not lat or not lon: return []
 
     url = f"https://{ATTOM_HOST}/propertyapi/v1.0.0/sale/snapshot"
-    params = {"latitude": lat, "longitude": lon, "radius": radius, "pageSize": count, "propertyTypes": "SFR"}
+    # FINAL FIX: Removed unsupported parameters like orderBy and propertyTypes
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "radius": radius,
+        "pageSize": count,
+    }
     
     try:
         resp = await client.get(url, headers=A_HEADERS, params=params)
@@ -92,6 +99,11 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
         if len(chosen) >= 3: break
         
         prop_details = (comp_data.get("property") or [comp_data])[0]
+        
+        # Filter for Single Family Residence here
+        prop_class = (prop_details.get("summary") or {}).get("propclass")
+        if prop_class and "Single Family" not in prop_class:
+            continue
 
         sale_date_str = (comp_data.get("sale") or {}).get("saleAmountData", {}).get("saleRecDate") or prop_details.get("lastSoldDate")
         if sale_date_str:
@@ -105,12 +117,16 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
 
         if not sold or not sqft: continue
             
-        chosen.append({**comp_data, "prop_details": prop_details})
-
+        comp_id = prop_details.get("zpid") or (prop_details.get("identifier") or {}).get("attomId")
+        if any(c.get('id') == comp_id for c in chosen if c.get('id')): continue
+            
+        chosen.append({**comp_data, "id": comp_id})
+        if len(chosen) >= 3: break
+    
     psfs = []
     formatted = []
     for comp in chosen:
-        prop_details = comp["prop_details"]
+        prop_details = (comp.get("property") or [comp])[0]
         sold = prop_details.get("lastSoldPrice") or (comp.get("sale", {}).get("saleAmountData", {}) or {}).get("saleAmt")
         sqft = prop_details.get("livingArea") or (prop_details.get("building", {}) or {}).get("size", {}).get("livingsize")
         
