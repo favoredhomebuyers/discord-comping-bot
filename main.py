@@ -134,7 +134,7 @@ if __name__ == "__main__":
         logger.error("ZILLOW_RAPIDAPI_KEY is not set!")
     if not os.getenv("ATTOM_API_KEY"):
         logger.error("ATTOM_API_KEY is not set!")
-    if not os.getenv("Maps_API_KEY"):
-        logger.error("Maps_API_KEY is not set!")
+    if not os.getenv("GOOGLE_MAPS_API_KEY"):
+        logger.error("GOOGLE_MAPS_API_KEY is not set!")
 
     bot.run(DISCORD_TOKEN)
