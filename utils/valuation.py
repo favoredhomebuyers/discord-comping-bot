@@ -2,6 +2,7 @@
 import os
 import asyncio
 import httpx
+import json # <--- Ensure this import is at the top
 from haversine import haversine, Unit
 from typing import List, Tuple
 from datetime import datetime
@@ -19,6 +20,7 @@ A_HEADERS = {"apikey": ATTOM_KEY}
 
 client = httpx.AsyncClient(timeout=20.0)
 
+# ... (get_subject_data, fetch_property_details, fetch_zillow_comps, fetch_attom_comps functions are unchanged) ...
 async def get_subject_data(address: str) -> Tuple[dict, dict]:
     print(f"[DEBUG VAL] get_subject_data: address={address}")
     zpid = await find_zpid_by_address_async(address)
@@ -118,12 +120,12 @@ async def fetch_attom_comps(subject: dict, radius: int = 10, count: int = 50) ->
     except httpx.RequestError:
         return []
 
-
 def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float]:
     try:
         s_lat = float(subject.get("latitude"))
         s_lon = float(subject.get("longitude"))
     except (ValueError, TypeError):
+        print("[ERROR VAL] Subject property has invalid coordinates.")
         return [], 0.0
 
     actual_sqft = subject.get("sqft")
@@ -135,7 +137,9 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             break
             
         for comp in comps:
-            # CORRECTED PARSING LOGIC
+            # THIS IS THE IMPORTANT DEBUGGING LINE
+            print(f"[RAW COMP]: {json.dumps(comp, indent=2)}")
+            
             comp_sold = comp.get("lastSoldPrice") or (comp.get("sale") or {}).get("amount")
             comp_sqft = comp.get("livingArea") or (comp.get("building", {}).get("size", {}) or {}).get("livingSize")
 
@@ -146,6 +150,7 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             if prop_class and "Single Family" not in prop_class:
                 continue
 
+            # ... (rest of the function is identical)
             if any(c.get("zpid") == comp.get("zpid") for c in chosen if c.get("zpid") and comp.get("zpid")):
                  continue
             if any(c.get("id") == comp.get("id") for c in chosen if c.get("id") and comp.get("id")):
@@ -161,8 +166,8 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             if distance > radius:
                 continue
 
-            sqft_tolerance = 750 # Loosened for better matching
-            year_tolerance = 30 # Loosened for better matching
+            sqft_tolerance = 750 
+            year_tolerance = 30 
 
             subject_beds = subject.get("beds")
             comp_beds = comp.get("bedrooms") or (comp.get("building", {}).get("rooms", {}) or {}).get("beds")
@@ -190,7 +195,6 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
     psfs = []
     formatted = []
     for comp in sorted(chosen, key=lambda x: x["distance"]):
-        # CORRECTED PARSING LOGIC
         sold = comp.get("lastSoldPrice") or (comp.get("sale") or {}).get("amount")
         sqft = comp.get("livingArea") or (comp.get("building",{}).get("size",{}) or {}).get("livingSize")
         
@@ -237,7 +241,6 @@ async def get_comp_summary(address: str, manual_sqft: int = None) -> Tuple[List[
             date_str = (comp.get("sale") or {}).get("saleDate") or comp.get("lastSoldDate")
             if not date_str:
                 return datetime.min
-            # Zillow returns milliseconds, Attom does not. Handle both.
             if isinstance(date_str, int):
                 return datetime.fromtimestamp(date_str / 1000)
             if '+' in date_str:
@@ -252,18 +255,5 @@ async def get_comp_summary(address: str, manual_sqft: int = None) -> Tuple[List[
 
         sorted_comps = sorted(raw_comps, key=get_sale_date, reverse=True)
         clean_comps, avg_psf = get_clean_comps(subject, sorted_comps)
-
-    # Make sure we have subject sqft for the final return value
-    final_sqft = subject.get("sqft")
-    if not final_sqft and clean_comps:
-       # A fallback if subject sqft is still missing
-       try:
-           s_lat = float(subject.get("latitude"))
-           s_lon = float(subject.get("longitude"))
-           # Find the closest comp and steal its sqft - not ideal, but better than nothing
-           closest_comp = min(clean_comps, key=lambda c: haversine((s_lat, s_lon), (float(c.get('latitude',0)), float(c.get('longitude',0)))))
-           final_sqft = closest_comp.get('sqft')
-       except (ValueError, TypeError):
-           final_sqft = None
            
-    return clean_comps, avg_psf, final_sqft or 0
+    return clean_comps, avg_psf, subject.get("sqft") or 0
