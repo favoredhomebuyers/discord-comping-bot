@@ -34,6 +34,7 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
     else:
         return {}, {}
 
+    # Try to get details from Zillow first
     if zpid:
         subj_ids["zpid"] = zpid
         details = await fetch_property_details(zpid)
@@ -44,7 +45,21 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
                 "baths": details.get("bathrooms"),
                 "year": details.get("yearBuilt"),
             })
-            
+    
+    # If Zillow fails to provide key details, use Attom as a fallback
+    if not all(subject_info.get(k) for k in ["sqft", "beds", "baths", "year"]):
+        print("[INFO VAL] Zillow details incomplete, using ATTOM fallback for subject property...")
+        attom_subject_list = await fetch_attom_comps_fallback(subject_info, radius=0.1)
+        if attom_subject_list:
+            # The data is nested, so we need to go one level deeper
+            prop_details = (attom_subject_list[0].get("property") or [{}])[0]
+            if prop_details:
+                # Fill in any missing details
+                if not subject_info.get("sqft"): subject_info["sqft"] = (prop_details.get("building", {}).get("size", {}) or {}).get("livingsize")
+                if not subject_info.get("beds"): subject_info["beds"] = (prop_details.get("building", {}).get("rooms", {}) or {}).get("beds")
+                if not subject_info.get("baths"): subject_info["baths"] = (prop_details.get("building", {}).get("rooms", {}) or {}).get("bathstotal")
+                if not subject_info.get("year"): subject_info["year"] = (prop_details.get("summary", {}) or {}).get("yearbuilt")
+
     return subj_ids, subject_info
 
 async def fetch_property_details(zpid: str) -> dict:
@@ -53,7 +68,6 @@ async def fetch_property_details(zpid: str) -> dict:
         resp = await client.get(url, headers=Z_HEADERS, params={"zpid": zpid})
         return resp.json() if resp.status_code == 200 else {}
     except httpx.RequestError: return {}
-
 
 async def fetch_zillow_comps(zpid: str) -> List[dict]:
     details = await fetch_property_details(zpid)
@@ -91,26 +105,23 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
     filtered_comps = []
     for comp_data in comps:
         prop_details = (comp_data.get("property") or [comp_data])[0]
-
-        # 1. Filter by Sale Date
-        sale_date_str = (comp_data.get("sale") or {}).get("amount", {}).get("saleRecDate")
+        
+        sale_date_str = (comp_data.get("sale") or {}).get("saleAmountData", {}).get("saleRecDate") or prop_details.get("lastSoldDate")
         if sale_date_str:
             try:
-                sale_date = datetime.strptime(sale_date_str, "%Y-%m-%d")
+                sale_date = datetime.fromtimestamp(sale_date_str / 1000) if isinstance(sale_date_str, int) else datetime.strptime(sale_date_str, "%Y-%m-%d")
                 if sale_date < one_year_ago: continue
-            except (ValueError, TypeError): continue
+            except (ValueError, TypeError): pass
         else: continue
 
-        # 2. Filter by Square Footage
-        sqft = (prop_details.get("building", {}).get("size", {}) or {}).get("livingsize")
+        sqft = (prop_details.get("building", {}).get("size", {}) or {}).get("livingsize") or prop_details.get("livingArea")
         if not sqft or abs(sqft - actual_sqft) > 400:
             continue
 
-        # 3. Filter by Year Built
-        year = (prop_details.get("summary", {}) or {}).get("yearbuilt")
+        year = (prop_details.get("summary", {}) or {}).get("yearbuilt") or prop_details.get("yearBuilt")
         if not year or abs(year - actual_year) > 20:
             continue
-
+        
         filtered_comps.append(comp_data)
 
     if not filtered_comps:
@@ -134,15 +145,15 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
     formatted = []
     for comp in chosen_comps:
         prop_details = (comp.get("property") or [comp])[0]
-        sold = (comp.get("sale", {}).get("amount", {}) or {}).get("saleAmt")
-        sqft = (prop_detais.get("building", {}) or {}).get("size", {}).get("livingsize")
+        sold = (comp.get("sale", {}).get("saleAmountData", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice")
+        sqft = (prop_details.get("building", {}) or {}).get("size", {}).get("livingsize") or prop_details.get("livingArea")
         
         psf = sold / sqft if sold and sqft else 0
         psfs.append(psf)
         
         comp_address = prop_details.get("address", {})
         formatted.append({
-            "address": comp_address.get("oneLine"),
+            "address": comp_address.get("oneLine") or prop_details.get("streetAddress"),
             "sold_price": int(sold), "sqft": int(sqft), "psf": round(psf, 2),
         })
         
@@ -154,11 +165,9 @@ async def get_comp_summary(address: str, manual_sqft: int = None) -> Tuple[List[
     if manual_sqft: subject["sqft"] = manual_sqft
         
     raw_comps = []
-    # Always try Zillow first
     if subj_ids.get("zpid"):
         raw_comps = await fetch_zillow_comps(subj_ids["zpid"])
             
-    # If Zillow returns no comps, fall back to ATTOM
     if not raw_comps:
         print("[INFO VAL] Zillow returned no comps, trying ATTOM fallback.")
         raw_comps = await fetch_attom_comps_fallback(subject)
