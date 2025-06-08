@@ -13,7 +13,7 @@ from utils.pitch_generator import generate_pitch
 
 # ─── Logging Setup ─────────────────────────────────────────────────────────────
 logging.basicConfig(
-    level=logging.INFO, # Changed to INFO to reduce log spam
+    level=logging.INFO,
     format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
@@ -64,9 +64,7 @@ async def on_message(message: discord.Message):
             market_type = infer_market_type(market_info.get("Days on Market", ""))
             
             # --- 3. Get Deal Breakdowns ---
-            # Use the calculated average PSF for ARV estimates
-            arv = subject_sqft * avg_psf if subject_sqft and avg_psf else 0
-            deals = get_comps_and_arv(arv, notes, level)
+            deals = get_comps_and_arv(subject_sqft, avg_psf, level)
 
             # --- 4. Generate Sales Pitch ---
             pitch = generate_pitch(notes, exit_str)
@@ -77,8 +75,6 @@ async def on_message(message: discord.Message):
             return
 
     # --- 5. Assemble the Final Response ---
-    
-    # Main content message
     main_content = (
         f"**Exit Strategies:** {exit_str}\n"
         f"**Notes:** {notes}\n"
@@ -94,7 +90,7 @@ async def on_message(message: discord.Message):
     )
 
     for c in comps:
-        main_content += f"• **{c['address']} [{c['grade']}]**: ${c['sold_price']:,} ({c['sqft']} sqft)\n"
+        main_content += f"• **{c['address']} [{c['grade']}]**: ${c['sold_price']:,} (${c['psf']}/sqft)\n"
 
     main_content += (
         f"\n**Deal Breakdowns:**\n"
@@ -104,14 +100,13 @@ async def on_message(message: discord.Message):
         f"  • **Fee:** -${deals['fee']:,}\n"
         f"  • **MOA Cash:** `${deals['cash_offer']:,}`\n"
         f"\n— **RBP** —\n"
-        f"  • **As-Is:** {subject_sqft} sqft × ${avg_psf:,.2f}/sqft = ${deals['arv']:,.0f}\n"
+        f"  • **As-Is Value:** ${deals['arv']:,.0f}\n"
         f"  • **RBP factor (90%):** ×0.90 = ${deals['as_is_value_rbp']:,.0f}\n"
         f"  • **Fee:** -${deals['fee']:,}\n"
         f"  • **MOA RBP:** `${deals['rbp_offer']:,}`\n\n"
         f"**Pitch:**\n{pitch}"
     )
 
-    # The embed now only contains the Zillow links for a cleaner look
     embed = Embed(
         title=f"Zillow Links for {address}",
         color=0x007AFF
@@ -128,18 +123,19 @@ async def on_message(message: discord.Message):
 
 
 if __name__ == "__main__":
-    if not DISCORD_TOKEN:
+    if not os.getenv("DISCORD_TOKEN"):
         logger.error("DISCORD_TOKEN is not set!")
         exit(1)
     
-    # Validate other essential API keys
+    # Corrected validation for all essential API keys
     if not os.getenv("OPENAI_API_KEY"):
         logger.error("OPENAI_API_KEY is not set!")
     if not os.getenv("ZILLOW_RAPIDAPI_KEY"):
         logger.error("ZILLOW_RAPIDAPI_KEY is not set!")
     if not os.getenv("ATTOM_API_KEY"):
         logger.error("ATTOM_API_KEY is not set!")
-    if not os.getenv("Maps_API_KEY"):
-        logger.error("Maps_API_KEY is not set!")
+    # THIS LINE IS NOW CORRECTED:
+    if not os.getenv("GOOGLE_MAPS_API_KEY"):
+        logger.error("GOOGLE_MAPS_API_KEY is not set!")
 
     bot.run(DISCORD_TOKEN)
