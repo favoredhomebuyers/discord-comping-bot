@@ -1,0 +1,16 @@
+[project]
+name = "python-template"
+version = "0.1.0"
+description = ""
+authors = ["Your Name <you@example.com>"]
+requires-python = ">=3.11"
+dependencies = [
+    "discord-py>=2.5.2",
+    "geopy==2.4.1",
+    "haversine>=2.9.0",
+    "openai>=1.84.0",
+    "pandas==2.2.3",
+    "pitch>=0.0.6",
+    "python-dotenv>=1.1.0",
+    "requests>=2.32.3",
+]
