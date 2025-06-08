@@ -12,33 +12,50 @@ GMAPS_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 gmaps = googlemaps.Client(key=GMAPS_KEY) if GMAPS_KEY else None
 
 
-def get_coordinates(address: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+# ... (imports)
+def get_coordinates(address: str) -> Optional[dict]:
     """
-    Geocode an address via Google Maps and return (latitude, longitude, formatted_address).
+    Geocode an address via Google Maps and return a dictionary with coordinates and address components.
     """
     if not gmaps:
         logger.error("Google Maps API key not configured.")
-        return None, None, None
+        return None
 
     logger.debug(f"📍 Geocoding address: {address}")
     try:
         results = gmaps.geocode(address, region="us")
     except Exception as e:
         logger.error(f"Geocoding error for {address}: {e}")
-        return None, None, None
+        return None
 
     if not results:
         logger.warning(f"No geocode results for: {address}")
-        return None, None, None
+        return None
 
     top = results[0]
     loc = top.get("geometry", {}).get("location", {})
-    lat = loc.get("lat")
-    lng = loc.get("lng")
-    formatted = top.get("formatted_address")
-    logger.debug(f"↳ got coordinates: ({lat}, {lng}) formatted: {formatted}")
-    return lat, lng, formatted
+    
+    components = {}
+    for comp in top.get("address_components", []):
+        if "street_number" in comp["types"]:
+            components["street"] = f'{comp["long_name"]} '
+        if "route" in comp["types"]:
+            components["street"] = components.get("street", "") + comp["long_name"]
+        if "locality" in comp["types"]:
+            components["city"] = comp["long_name"]
+        if "administrative_area_level_1" in comp["types"]:
+            components["state"] = comp["short_name"]
+        if "postal_code" in comp["types"]:
+            components["postal_code"] = comp["long_name"]
 
+    return {
+        "lat": loc.get("lat"),
+        "lng": loc.get("lng"),
+        "formatted": top.get("formatted_address"),
+        "components": components,
+    }
+
+# ... (keep parse_address)
 
 def parse_address(text: str) -> Tuple[str, str, Optional[int], str, str]:
     """
