@@ -95,9 +95,6 @@ async def fetch_zillow_comps(zpid: str, count: int = 50) -> List[dict]:
 
 
 async def fetch_attom_comps(subject: dict, radius: int = 10) -> List[dict]:
-    """
-    Fetches comps from ATTOM using only the valid parameters: latitude, longitude, and radius.
-    """
     lat = subject.get("latitude")
     lon = subject.get("longitude")
 
@@ -106,7 +103,6 @@ async def fetch_attom_comps(subject: dict, radius: int = 10) -> List[dict]:
         return []
 
     url = f"https://{ATTOM_HOST}/propertyapi/v1.0.0/property/snapshot"
-    # CORRECTED: Only send parameters the API endpoint supports.
     params = {
         "latitude": lat,
         "longitude": lon,
@@ -127,7 +123,14 @@ async def fetch_attom_comps(subject: dict, radius: int = 10) -> List[dict]:
 
 
 def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float]:
-    lat, lon = subject.get("latitude"), subject.get("longitude")
+    # FINAL FIX: Convert subject coordinates to float and handle errors.
+    try:
+        s_lat = float(subject.get("latitude"))
+        s_lon = float(subject.get("longitude"))
+    except (ValueError, TypeError):
+        print("[ERROR VAL] Subject property has invalid coordinates.")
+        return [], 0.0
+
     actual_sqft = subject.get("sqft")
     tiers = [(1, "A+"), (2, "B+"), (3, "C+"), (5, "D+"), (10, "F")]
     chosen = []
@@ -137,7 +140,6 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             break
             
         for comp in comps:
-            # CORRECTED: Filter for Single Family Residence here instead of in the API call
             prop_class = comp.get("summary", {}).get("propclass")
             if prop_class and "Single Family" not in prop_class:
                 continue
@@ -147,13 +149,14 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             if any(c.get("id") == comp.get("id") for c in chosen if c.get("id")):
                  continue
 
-            lat2 = comp.get("latitude") or comp.get("location", {}).get("latitude")
-            lon2 = comp.get("longitude") or comp.get("location", {}).get("longitude")
+            # FINAL FIX: Convert comp coordinates to float and handle errors
+            try:
+                lat2 = float(comp.get("latitude") or comp.get("location", {}).get("latitude"))
+                lon2 = float(comp.get("longitude") or comp.get("location", {}).get("longitude"))
+            except (ValueError, TypeError):
+                continue # Skip comp if its coordinates are invalid
 
-            if not all([lat, lon, lat2, lon2]):
-                continue
-            
-            distance = haversine((lat, lon), (lat2, lon2), unit=Unit.MILES)
+            distance = haversine((s_lat, s_lon), (lat2, lon2), unit=Unit.MILES)
             if distance > radius:
                 continue
 
@@ -225,7 +228,6 @@ async def get_comp_summary(address: str, manual_sqft: int = None) -> Tuple[List[
     raw_comps.extend(await fetch_attom_comps(subject))
 
     if raw_comps:
-        # CORRECTED: Sort all comps by sale date (newest first) before filtering
         def get_sale_date(comp):
             date_str = (comp.get("sale") or {}).get("saleDate")
             return datetime.strptime(date_str, "%Y-%m-%d") if date_str else datetime.min
