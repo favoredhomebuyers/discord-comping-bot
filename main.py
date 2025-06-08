@@ -5,39 +5,33 @@ import asyncio
 
 from utils.address_tools import get_coordinates
 from utils.zpid_finder import find_zpid_by_address_async
-from valuation import get_comp_summary  # your updated valuation logic
+from utils.valuation     import get_comp_summary    # ← fixed import!
 
-# ─── Setup basic logging to stdout ─────────────────────────────────────────────
-logging.basicConfig(level=logging.DEBUG,
-                    format='%(asctime)s %(levelname)8s %(message)s')
+# ─── Setup logging ──────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)8s %(message)s"
+)
 log = logging.getLogger(__name__)
 
-# ─── Discord client with message content intent ────────────────────────────────
+# ─── Discord client ─────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# ─── Event: Bot ready ────────────────────────────────────────────────────────────
 @client.event
 async def on_ready():
     log.info(f"✅ Bot logged in as {client.user} (ID: {client.user.id})")
     log.info(f"   Connected to guilds: {[g.name for g in client.guilds]}")
 
-# ─── Event: Message received ─────────────────────────────────────────────────────
 @client.event
 async def on_message(message: discord.Message):
-    # ignore messages from ourselves
     if message.author.id == client.user.id:
         return
 
-    log.debug(f"📨 Message received from {message.author} in {message.channel}: {message.content!r}")
+    log.debug(f"📨 Message from {message.author} in {message.channel}: {message.content!r}")
 
-    # only respond to messages in DMs or a specific prefix or channel
-    if not message.content.strip():
-        log.debug("   ↳ empty message, skipping")
-        return
-
-    # Example: we treat any message as an address request
+    # Grab first line as the address
     address = message.content.strip().split("\n")[0]
     log.info(f"   ↳ parsing address: {address!r}")
 
@@ -69,11 +63,10 @@ async def on_message(message: discord.Message):
         log.exception("❌ Error handling message")
         await message.reply(f"❌ An error occurred while processing `{address}`:\n```{e}```")
 
-# ─── Run the bot ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     token = os.getenv("DISCORD_BOT_TOKEN")
     if not token:
-        log.critical("DISCORD_BOT_TOKEN is not set in environment variables!")
+        log.critical("DISCORD_BOT_TOKEN is not set!")
         exit(1)
 
     log.info("🔑 Starting bot...")
