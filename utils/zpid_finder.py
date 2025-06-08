@@ -1,32 +1,50 @@
-import re
-from urllib.parse import quote_plus
-from playwright.async_api import async_playwright
+import os
+import logging
+import aiohttp
+from typing import Optional
 
-async def find_zpid_by_address_async(address: str) -> str:
+logger = logging.getLogger(__name__)
+
+# Zillow RapidAPI config
+iZILLOW_HOST = os.getenv("ZILLOW_RAPIDAPI_HOST", "zillow-com1.p.rapidapi.com")
+iZILLOW_KEY = os.getenv("ZILLOW_RAPIDAPI_KEY", "")
+
+HEADERS = {
+    "x-rapidapi-host": iZILLOW_HOST,
+    "x-rapidapi-key": iZILLOW_KEY,
+}
+
+async def find_zpid_by_address_async(address: str) -> Optional[str]:
     """
-    Uses Playwright async to load the Zillow listing page and extract the ZPID.
+    Given a full address string, query Zillow via RapidAPI to find the property's ZPID.
+    Returns the ZPID as a string, or None if not found.
     """
+    # Endpoint for search results
+    url = f"https://{iZILLOW_HOST}/search"
+    params = {"location": address}
+
+    logger.debug(f"[ZPID] Searching for ZPID: URL={url}, params={params}")
     try:
-        query = quote_plus(address)
-        url = f"https://www.zillow.com/homes/{query}_rb/"
-        print("[ZPID-Finder] 🔍 Launching Playwright for:", address)
-
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
-            await page.goto(url, timeout=15000)
-            content = await page.content()
-            await browser.close()
-
-        match = re.search(r'"zpid":\s*"?(?P<zpid>\d{8,})"?', content)
-        if match:
-            zpid = match.group("zpid")
-            print("[ZPID-Finder] ✅ Found ZPID:", zpid)
-            return zpid
-        else:
-            print("[ZPID-Finder] ❌ ZPID not found in HTML")
-            return None
-
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=HEADERS, params=params) as resp:
+                text = await resp.text()
+                logger.debug(f"[ZPID] Raw response text (first 500 chars): {text[:500]}")
+                data = await resp.json()
     except Exception as e:
-        print("[ZPID-Finder] ❌ Exception occurred:", e)
+        logger.exception(f"[ZPID] HTTP error while fetching ZPID for {address}: {e}")
         return None
+
+    # Attempt to extract ZPID from JSON
+    zpid = None
+    try:
+        # Zillow RapidAPI typically returns "props": [...], each has "zpid"
+        props = data.get("props") or data.get("cat1")
+        if isinstance(props, list) and props:
+            # pick the first result
+            first = props[0]
+            zpid = first.get("zpid") or first.get("propertyId")
+        logger.debug(f"[ZPID] Parsed response JSON, extracted zpid={zpid}")
+    except Exception as e:
+        logger.exception(f"[ZPID] Error parsing ZPID JSON for {address}: {e}")
+
+    return zpid
