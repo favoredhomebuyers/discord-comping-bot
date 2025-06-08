@@ -51,7 +51,6 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
         if attom_subject_list:
             prop_details = (attom_subject_list[0].get("property") or [{}])[0]
             if prop_details:
-                # CORRECTED: Using bldgsize for Attom sqft as requested
                 if not subject_info.get("sqft"): subject_info["sqft"] = (prop_details.get("building", {}).get("size", {}) or {}).get("bldgsize")
                 if not subject_info.get("beds"): subject_info["beds"] = (prop_details.get("building", {}).get("rooms", {}) or {}).get("beds")
                 if not subject_info.get("baths"): subject_info["baths"] = (prop_details.get("building", {}).get("rooms", {}) or {}).get("bathstotal")
@@ -109,8 +108,8 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
                 if sale_date < one_year_ago: continue
             except (ValueError, TypeError): continue
         else: continue
-
-        # CORRECTED: Using bldgsize for Attom sqft as requested
+        
+        # FINAL SYNTAX CORRECTION HERE
         sqft = (prop_details.get("building", {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea")
         year = (prop_details.get("summary", {}) or {}).get("yearbuilt") or prop_details.get("yearBuilt")
         sold = (comp_data.get("sale", {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice")
@@ -140,10 +139,10 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
     for comp in chosen_comps:
         prop_details = (comp.get("property") or [comp])[0]
         sold = (comp.get("sale", {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice")
-        # CORRECTED: Using bldgsize for Attom sqft as requested
         sqft = (prop_details.get("building", {}) or {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea")
         
-        psf = sold / sqft if sold and sqft else 0
+        if not sold or not sqft: continue
+        psf = sold / sqft
         psfs.append(psf)
         
         comp_address = prop_details.get("address", {})
