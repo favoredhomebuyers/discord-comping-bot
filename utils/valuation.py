@@ -1,4 +1,3 @@
-# utils/valuation.py
 import os
 import asyncio
 import httpx
@@ -45,7 +44,7 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
                 "baths": details.get("bathrooms"),
                 "year": details.get("yearBuilt"),
             })
-
+            
     return subj_ids, subject_info
 
 async def fetch_property_details(zpid: str) -> dict:
@@ -56,6 +55,7 @@ async def fetch_property_details(zpid: str) -> dict:
         return resp.json()
     except httpx.RequestError: return {}
 
+
 async def fetch_zillow_comps(zpid: str, count: int = 20) -> List[dict]:
     details = await fetch_property_details(zpid)
     if isinstance(details.get("comps"), list):
@@ -64,26 +64,29 @@ async def fetch_zillow_comps(zpid: str, count: int = 20) -> List[dict]:
     return []
 
 async def fetch_attom_comps(subject: dict, radius: int = 2, count: int = 20) -> List[dict]:
-    components = subject.get("address_components")
-    if not components: return []
+    lat = subject.get("latitude")
+    lon = subject.get("longitude")
 
-    street = components.get("street")
-    city = components.get("city")
-    state = components.get("state")
-    postal_code = components.get("postal_code")
+    if not lat or not lon: return []
 
-    if not all([street, city, state, postal_code]): return []
-
-    url = f"https://{ATTOM_HOST}/propertyapi/v1.0.0/comparables"
-    params = {"address1": street, "address2": f"{city}, {state} {postal_code}", "radius": radius}
+    # Use the /sale/snapshot endpoint with coordinates, which is designed for this
+    url = f"https://{ATTOM_HOST}/propertyapi/v1.0.0/sale/snapshot"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "radius": radius,
+        "propertyTypes": "SFR",
+        "pageSize": count,
+        "orderBy": "saleDate"
+    }
     
     try:
         resp = await client.get(url, headers=A_HEADERS, params=params)
         if resp.status_code != 200:
-            print(f"[WARNING VAL] ATTOM comparables failed: {resp.status_code} - {resp.text}")
+            print(f"[WARNING VAL] ATTOM sale snapshot failed: {resp.status_code} - {resp.text}")
             return []
         data = resp.json()
-        return data.get("compProperties") or []
+        return data.get("property") or []
     except httpx.RequestError as e:
         print(f"[ERROR VAL] HTTP error fetching ATTOM comps: {e}")
         return []
@@ -100,15 +103,13 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
     
     for radius, grade in tiers:
         if len(chosen) >= 3: break
-        for comp in comps:
-            if any(c.get('zpid') == comp.get('zpid') for c in chosen if c.get('zpid') and comp.get('zpid')): continue
-            
-            # ATTOM data nests details under 'propertySummary'
-            prop_details = comp.get("propertySummary") or comp
-            
-            # Universal parsing for Zillow and ATTOM
-            sold = prop_details.get("lastSoldPrice") or (prop_details.get("lastSale") or {}).get("saleAmt")
-            sqft = prop_details.get("livingArea") or (prop_details.get("building", {}).get("size", {}) or {}).get("sqFtLiving")
+        for comp_data in comps:
+            # Data from Zillow is flat, data from Attom is nested
+            prop_details = (comp_data.get("property") or [comp_data])[0]
+
+            # Universal parsing for Zillow and ATTOM data structures
+            sold = prop_details.get("lastSoldPrice") or (comp_data.get("sale", {}).get("saleAmountData", {}) or {}).get("saleAmt")
+            sqft = prop_details.get("livingArea") or (prop_details.get("building", {}).get("size", {}) or {}).get("livingSize")
 
             if not sold or not sqft: continue
             
@@ -117,19 +118,18 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
                 lon2 = float(prop_details.get("longitude") or (prop_details.get("location", {}) or {}).get("longitude"))
             except (ValueError, TypeError): continue
 
-            distance = haversine((s_lat, s_lon), (lat2, lon2), unit=Unit.MILES)
-            if distance > radius: continue
+            if haversine((s_lat, s_lon), (lat2, lon2), unit=Unit.MILES) > radius: continue
             
-            chosen.append({**comp, "grade": grade, "distance": distance})
+            chosen.append({**comp_data, "grade": grade, "distance": haversine((s_lat, s_lon), (lat2, lon2), unit=Unit.MILES)})
             if len(chosen) >= 3: break
     
     psfs = []
     formatted = []
     for comp in sorted(chosen, key=lambda x: x["distance"]):
-        prop_details = comp.get("propertySummary") or comp
+        prop_details = (comp.get("property") or [comp])[0]
         
-        sold = prop_details.get("lastSoldPrice") or (prop_details.get("lastSale") or {}).get("saleAmt")
-        sqft = prop_details.get("livingArea") or (prop_details.get("building", {}) or {}).get("size", {}).get("sqFtLiving")
+        sold = prop_details.get("lastSoldPrice") or (comp.get("sale", {}).get("saleAmountData", {}) or {}).get("saleAmt")
+        sqft = prop_details.get("livingArea") or (prop_details.get("building", {}) or {}).get("size", {}).get("livingSize")
         
         psf = sold / sqft if sqft and sold else None
         if psf: psfs.append(psf)
@@ -137,7 +137,7 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
         comp_address = prop_details.get("address", {})
         
         formatted.append({
-            "address": comp_address.get("oneLine") or prop_details.get("address", {}).get("streetAddress"),
+            "address": comp_address.get("oneLine") or comp_address.get("streetAddress"),
             "sold_price": int(sold), "sqft": int(sqft), "psf": round(psf, 2) if psf else None,
             "zillow_url": f"https://www.zillow.com/homedetails/{prop_details.get('zpid')}_zpid/" if prop_details.get('zpid') else "#",
             "grade": comp.get("grade"),
