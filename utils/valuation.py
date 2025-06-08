@@ -108,7 +108,7 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
                 if sale_date < one_year_ago: continue
             except (ValueError, TypeError): continue
         else: continue
-        
+
         # FINAL SYNTAX CORRECTION HERE
         sqft = (prop_details.get("building", {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea")
         year = (prop_details.get("summary", {}) or {}).get("yearbuilt") or prop_details.get("yearBuilt")
@@ -139,9 +139,9 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
     for comp in chosen_comps:
         prop_details = (comp.get("property") or [comp])[0]
         sold = (comp.get("sale", {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice")
-        sqft = (prop_details.get("building", {}) or {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea")
+        sqft = (prop_details.get("building", {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea")
         
-        if not sold or not sqft: continue
+        if not sold or not sqft: continue # Failsafe
         psf = sold / sqft
         psfs.append(psf)
         
