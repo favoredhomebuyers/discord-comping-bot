@@ -1,15 +1,13 @@
 # utils/comps.py
 
-def get_comps_and_arv(arv_estimate: float, notes: str, rehab_level: int) -> dict:
+def get_comps_and_arv(sqft: int, avg_psf: float, rehab_level: int) -> dict:
     """
-    Returns pricing breakdowns for Cash, RBP, and Takedown strategies.
-    Now correctly uses the pre-calculated ARV.
+    Returns pricing breakdowns for Cash, RBP, and Takedown strategies based on:
+    - rehab level cost
+    - ARV (calculated from real comps) and As-Is value
     """
     fee = 40000
-    # Note: Rehab cost calculation might need adjustment.
-    # It assumes sqft is part of the 'notes' or handled elsewhere.
-    # For now, we'll make it a fixed placeholder.
-    rehab_cost = 10000 * rehab_level # Placeholder: $10k, $20k, $30k etc.
+    rehab_cost = (sqft or 1500) * (10 * rehab_level)  # $10 to $50/sqft based on level
 
     def arv_multiplier(arv):
         if arv < 100_000: return 0.55
@@ -19,18 +17,17 @@ def get_comps_and_arv(arv_estimate: float, notes: str, rehab_level: int) -> dict
         elif arv < 500_000: return 0.80
         else: return 0.85
 
-    # Use the ARV calculated from real comps
-    cash_moa = arv_estimate * arv_multiplier(arv_estimate) - rehab_cost - fee
-    
-    # As-Is value for RBP is the same as ARV in this simplified model
-    as_is_est = arv_estimate
-    rbp_moa = as_is_est * 0.90 # Using 90% for RBP
-    
-    # Takedown calculation
+    # Use the ARV calculated from real comps passed from main.py
+    arv_est = (sqft or 1500) * (avg_psf or 150)
+    as_is_est = arv_est # Assuming As-Is is the same as ARV for this calculation
+
+    # Calculate offers
+    cash_moa = arv_est * arv_multiplier(arv_est) - rehab_cost - fee
+    rbp_moa = as_is_est * 0.90 - fee
     td_moa = as_is_est * 0.95 - 75000
 
     return {
-        "arv": arv_estimate,
+        "arv": arv_est,
         "rehab_cost": int(rehab_cost),
         "fee": fee,
         "as_is_value_rbp": rbp_moa,
