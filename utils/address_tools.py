@@ -1,89 +1,84 @@
 import os
 import re
-import requests
+import logging
+import googlemaps
 from typing import Tuple, Optional
 
-GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
+# ─── Logging Setup ─────────────────────────────────────────────────────────────
+logger = logging.getLogger("AddressTools")
+
+# ─── Google Maps Client ────────────────────────────────────────────────────────
+GMAPS_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
+gmaps = googlemaps.Client(key=GMAPS_KEY) if GMAPS_KEY else None
 
 
-def get_coordinates(address: str) -> Tuple[float, float, Optional[str], Optional[str]]:
+def get_coordinates(address: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
     """
-    Given a street address, returns (latitude, longitude, city, state).
-    Raises if no result is found.
+    Geocode an address via Google Maps and return (latitude, longitude, formatted_address).
     """
-    geocode_url = "https://maps.googleapis.com/maps/api/geocode/json"
-    params = {
-        "address": address,
-        "key": GOOGLE_MAPS_API_KEY,
-        "region": "us"
-    }
-    resp = requests.get(geocode_url, params=params)
-    resp.raise_for_status()
-    data = resp.json()
-    results = data.get("results", [])
+    if not gmaps:
+        logger.error("Google Maps API key not configured.")
+        return None, None, None
+
+    logger.debug(f"📍 Geocoding address: {address}")
+    try:
+        results = gmaps.geocode(address, region="us")
+    except Exception as e:
+        logger.error(f"Geocoding error for {address}: {e}")
+        return None, None, None
+
     if not results:
-        raise ValueError(f"No geocoding result for '{address}'")
-    loc = results[0]["geometry"]["location"]
-    lat, lon = loc["lat"], loc["lng"]
+        logger.warning(f"No geocode results for: {address}")
+        return None, None, None
 
-    # Reverse-geocode to get locality (city) and admin area level 1 (state)
-    params2 = {
-        "latlng": f"{lat},{lon}",
-        "key": GOOGLE_MAPS_API_KEY,
-        "result_type": "locality|administrative_area_level_1"
-    }
-    resp2 = requests.get(geocode_url, params=params2)
-    resp2.raise_for_status()
-    data2 = resp2.json()
-    city = state = None
-    for comp in data2.get("results", []):
-        for ac in comp.get("address_components", []):
-            types = ac.get("types", [])
-            if "locality" in types:
-                city = ac.get("long_name")
-            elif "administrative_area_level_1" in types:
-                state = ac.get("short_name")
-        if city and state:
-            break
-
-    return lat, lon, city, state
+    top = results[0]
+    loc = top.get("geometry", {}).get("location", {})
+    lat = loc.get("lat")
+    lng = loc.get("lng")
+    formatted = top.get("formatted_address")
+    logger.debug(f"↳ got coordinates: ({lat}, {lng}) formatted: {formatted}")
+    return lat, lng, formatted
 
 
-def parse_address(content: str) -> Tuple[str, Optional[str], Optional[int], Optional[str], Optional[str]]:
+def parse_address(text: str) -> Tuple[str, str, Optional[int], str, str]:
     """
-    Parses a multi-line Discord message into:
-      - address (first line)
-      - notes (value after 'Notes:')
-      - sqft (int after 'Sqft:')
-      - exit (value after 'Exit:')
-      - level (value after 'Level:')
-    Returns a 5-tuple: (address, notes, sqft, exit, level)
-    Any missing or unparsable fields become None.
+    Expects a block of lines:
+      1) address
+      2) Notes: ...
+      3) optional Sqft: <number>
+      4) Exit: ...
+      5) Level: ...
+    Returns (address, notes, manual_sqft, exit_str, level)
+    manual_sqft is int or None if missing.
     """
-    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 4:
+        raise ValueError("Expected at least 4 non-empty lines (address, notes, exit, level)")
+
     address = lines[0]
-
-    notes = None
-    sqft = None
-    exit_str = None
-    level = None
+    notes = ""
+    manual_sqft = None
+    exit_str = ""
+    level = ""
 
     for line in lines[1:]:
-        key, sep, val = line.partition(":")
-        if not sep:
-            continue
-        key = key.strip().lower()
-        val = val.strip()
-        if key == "notes":
-            notes = val
-        elif key == "sqft":
-            # extract digits only
-            digits = re.sub(r"[^\d]", "", val)
-            if digits.isdigit():
-                sqft = int(digits)
-        elif key == "exit":
-            exit_str = val
-        elif key == "level":
-            level = val
+        low = line.lower()
+        if low.startswith("notes"):  # Notes: ...
+            parts = line.split(":", 1)
+            notes = parts[1].strip() if len(parts) > 1 else ""
+        elif low.startswith("sqft"):  # Sqft: 1234
+            parts = line.split(":", 1)
+            val = parts[1].strip() if len(parts) > 1 else ""
+            num = re.sub(r"[^0-9]", "", val)
+            try:
+                manual_sqft = int(num) if num else None
+            except ValueError:
+                manual_sqft = None
+        elif low.startswith("exit"):  # Exit: Cash
+            parts = line.split(":", 1)
+            exit_str = parts[1].strip() if len(parts) > 1 else ""
+        elif low.startswith("level"):  # Level: 2
+            parts = line.split(":", 1)
+            level = parts[1].strip() if len(parts) > 1 else ""
 
-    return address, notes, sqft, exit_str, level
+    return address, notes, manual_sqft, exit_str, level
