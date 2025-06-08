@@ -97,44 +97,42 @@ async def fetch_zillow_comps(zpid: str, count: int = 50) -> List[dict]:
         return []
 
 
+# ... (keep all other functions as they were from the previous step) ...
+
 async def fetch_attom_comps(subject: dict, radius: int = 10, count: int = 50) -> List[dict]:
     """
-    Fetches comps from ATTOM. We fetch from a wide 10-mile radius by default
-    so the tiered filtering in get_clean_comps has enough data to work with.
+    Fetches comps from ATTOM using latitude and longitude for better reliability.
     """
-    components = subject.get("address_components")
-    if not components:
-        print(f"[WARNING VAL] ATTOM comps failed: No address components")
+    lat = subject.get("latitude")
+    lon = subject.get("longitude")
+
+    if not lat or not lon:
+        print(f"[WARNING VAL] ATTOM comps failed: No latitude/longitude for subject property.")
         return []
 
-    street = components.get("street")
-    city = components.get("city")
-    state = components.get("state")
-    
-    if not all([street, city, state]):
-        print(f"[WARNING VAL] ATTOM comps failed: Incomplete address for {street}")
-        return []
-
-    url = f"https://{ATTOM_HOST}/propertyapi/v1.0.0/sale/snapshot"
+    url = f"https://{ATTOM_HOST}/propertyapi/v1.0.0/property/snapshot"
     params = {
-        "address1": street,
-        "address2": f"{city}, {state}",
+        "latitude": lat,
+        "longitude": lon,
         "radius": radius,
         "size": count,
-        "propertytypes": "SFR",
+        "propertytype": "SFR",
         "orderby": "saledate"
     }
     
     try:
+        print(f"[DEBUG VAL] Querying ATTOM with params: {params}")
         resp = await client.get(url, headers=A_HEADERS, params=params)
         if resp.status_code != 200:
-            print(f"[WARNING VAL] ATTOM comps failed for {street}: {resp.status_code} - {resp.text}")
+            print(f"[WARNING VAL] ATTOM comps failed: {resp.status_code} - {resp.text}")
             return []
         data = resp.json()
         return data.get("property") or []
     except httpx.RequestError as e:
-        print(f"[ERROR VAL] HTTP error fetching ATTOM comps for {street}: {e}")
+        print(f"[ERROR VAL] HTTP error fetching ATTOM comps: {e}")
         return []
+
+# ... (ensure the other functions like get_comp_summary and get_clean_comps are present) ...
 
 
 def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float]:
