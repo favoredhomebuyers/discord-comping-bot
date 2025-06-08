@@ -1,108 +1,110 @@
-# main.py
-
 import os
 import logging
+
 import discord
 from dotenv import load_dotenv
 
 from utils.address_tools import parse_address
-from utils.valuation import (
-    get_subject_data,
-    fetch_zillow_comps,
-    fetch_attom_comps,       # ← implement this if you haven’t already
-    get_clean_comps,
-)
+from utils.valuation import get_comp_summary
 
+# -----------------------------------------------------------------------------
+#  CONFIG / BOILERPLATE
+# -----------------------------------------------------------------------------
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+if not DISCORD_TOKEN:
+    raise RuntimeError("DISCORD_BOT_TOKEN is not set in your environment")
 
-# set up logging
 logging.basicConfig(
     level=logging.DEBUG,
-    format="%(asctime)s %(levelname)7s %(message)s",
+    format="%(asctime)s %(levelname)-8s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
+logger = logging.getLogger(__name__)
 
 intents = discord.Intents.default()
+intents.message_content = True
+
 bot = discord.Client(intents=intents)
 
-
+# -----------------------------------------------------------------------------
+#  EVENTS
+# -----------------------------------------------------------------------------
 @bot.event
 async def on_ready():
-    logging.info(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
+    logger.info(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
 
 
 @bot.event
 async def on_message(message: discord.Message):
-    # 1) ignore other bots
+    # 1) Ignore messages from other bots (including ourselves)
     if message.author.bot:
         return
 
-    logging.debug(f"📨 Message from {message.author}: {message.content!r}")
-
-    # 2) parse the Discord message
-    address, notes, manual_sqft, exit_str, level = parse_address(message.content)
-    logging.info(f"↳ parsed address: '{address}'")
-    logging.debug(f"[PARSE] notes={notes!r}, manual_sqft={manual_sqft}, exit={exit_str!r}, level={level!r}")
-
-    # 3) fetch subject data (ZPID + fallback to coords)
-    logging.debug(f"[VAL] get_subject_data for '{address}'")
-    subj, subject = await get_subject_data(address)
-    logging.debug(f"[VAL] subject (pre‐override): {subject}")
-
-    # 4) override with manual sqft if provided
-    if manual_sqft is not None:
-        subject["sqft"] = manual_sqft
-        logging.info(f"↳ manual Sqft detected, overriding subject['sqft'] → {manual_sqft}")
-
-    # 5) attempt Zillow comps first
-    zpid = subj.get("zpid")
-    clean_comps, avg_psf = [], 0.0
-    if zpid:
-        comps_raw = fetch_zillow_comps(zpid)
-        logging.debug(f"[VAL] fetched {len(comps_raw)} raw Zillow comps")
-        clean_comps, avg_psf = get_clean_comps(subject, comps_raw)
-        logging.debug(f"[VAL] after Zillow filtering → {len(clean_comps)} comps, avg_psf={avg_psf:.2f}")
-
-    # 6) if no Zillow comps, try ATTOM
-    if not clean_comps:
-        logging.info("↳ no Zillow comps found, falling back to ATTOM")
-        attom_raw = fetch_attom_comps(address)
-        logging.debug(f"[VAL] fetched {len(attom_raw)} raw ATTOM comps")
-        clean_comps, avg_psf = get_clean_comps(subject, attom_raw)
-        logging.debug(f"[VAL] after ATTOM filtering → {len(clean_comps)} comps, avg_psf={avg_psf:.2f}")
-
-    # 7) reply
-    if not clean_comps:
-        # still nothing?
-        reply = f"⚠️ No comparable sales found for `{address}`."
-        logging.info(f"↳ sending reply: {reply}")
-        await message.channel.send(reply)
+    # 2) Ignore blank / whitespace-only messages
+    if not message.content or not message.content.strip():
         return
 
-    # 8) build the embed
-    embed = discord.Embed(
-        title=f"🏘 Comparable Sales for {address}",
-        color=0x2ecc71,
-    )
-    embed.add_field(name="Subject Sqft", value=subject["sqft"], inline=True)
-    embed.add_field(name="Avg $/Sqft", value=f"${avg_psf:,.2f}", inline=True)
-    embed.add_field(name="Notes", value=notes or "—", inline=False)
-    embed.add_field(name="Exit", value=exit_str or "—", inline=True)
-    embed.add_field(name="Level", value=level or "—", inline=True)
+    logger.debug(f"📨 Message from {message.author}: {message.content!r}")
 
-    for comp in clean_comps:
-        desc = (
-            f"💰 ${comp['sold_price']:,}\n"
-            f"📐 {comp['sqft']} sqft\n"
-            f"🛏 {comp['beds']} | 🛁 {comp['baths']}\n"
-            f"Grade: {comp['grade']}"
+    # 3) Parse the block of text into its pieces
+    try:
+        address, notes, manual_sqft, exit_str, level = parse_address(
+            message.content
         )
-        embed.add_field(name=comp["address"], value=desc, inline=False)
-        embed.add_field(name="🔗 Link", value=comp["zillow_url"], inline=False)
+    except Exception as e:
+        logger.error("Error parsing user input, skipping message", exc_info=e)
+        return
 
-    logging.info("↳ sending comps embed")
+    logger.info(f"↳ parsing address: '{address}'")
+    if manual_sqft:
+        logger.info(f"↳ manual Sqft detected: {manual_sqft}")
+
+    # 4) Fetch comps (pass manual_sqft through)
+    try:
+        comps, avg_psf, subject_sqft = await get_comp_summary(
+            address, manual_sqft
+        )
+    except Exception as e:
+        logger.error("Error fetching comps", exc_info=e)
+        await message.channel.send(
+            f"⚠️ Failed to fetch comps for `{address}`."
+        )
+        return
+
+    # 5) No comps? tell the user
+    if not comps:
+        await message.channel.send(
+            f"⚠️ No comparable sales found for `{address}`."
+        )
+        return
+
+    # 6) Build and send a Discord embed with the results
+    embed = discord.Embed(
+        title=f"🏠 Comps for {address}",
+        color=discord.Color.blue(),
+    )
+    embed.add_field(name="Subject Sqft", value=str(subject_sqft), inline=True)
+    embed.add_field(
+        name="Avg $/sqft", value=f"${avg_psf:.2f}", inline=True
+    )
+
+    for comp in comps:
+        comp_text = (
+            f"**{comp['address']}**\n"
+            f"Sold: ${comp['sold_price']:,}\n"
+            f"Sqft: {comp['sqft']}\n"
+            f"Beds/Baths: {comp['beds']}/{comp['baths']}\n"
+            f"Grade: {comp['grade']}\n"
+            f"[View on Zillow]({comp['zillow_url']})"
+        )
+        embed.add_field(name="\u200b", value=comp_text, inline=False)
+
     await message.channel.send(embed=embed)
 
 
+# -----------------------------------------------------------------------------
+#  RUN BOT
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
