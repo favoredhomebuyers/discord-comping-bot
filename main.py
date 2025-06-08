@@ -1,139 +1,108 @@
+# main.py
+
 import os
-import re
 import logging
 import discord
-from datetime import datetime
-from utils.address_tools import get_coordinates
-from utils.zpid_finder import find_zpid_by_address_async
-from utils.valuation import get_subject_data, fetch_zillow_comps, get_clean_comps
+from dotenv import load_dotenv
 
-# ─── Logging ─────────────────────────────────────────────────────────────────────
+from utils.address_tools import parse_address
+from utils.valuation import (
+    get_subject_data,
+    fetch_zillow_comps,
+    fetch_attom_comps,       # ← implement this if you haven’t already
+    get_clean_comps,
+)
+
+load_dotenv()
+DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+
+# set up logging
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s %(levelname)7s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
 )
-logger = logging.getLogger(__name__)
-
-# ─── Discord Setup ───────────────────────────────────────────────────────────────
-DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-if not DISCORD_TOKEN:
-    logger.critical("DISCORD_BOT_TOKEN is not set!")
-    exit(1)
 
 intents = discord.Intents.default()
-intents.message_content = True
 bot = discord.Client(intents=intents)
 
-# ─── Events ──────────────────────────────────────────────────────────────────────
 
 @bot.event
 async def on_ready():
-    logger.info(f"🔑 Bot logged in as {bot.user} (ID: {bot.user.id})")
-    logger.info(f"   Connected to guilds: {[g.name for g in bot.guilds]}")
+    logging.info(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
+
 
 @bot.event
 async def on_message(message: discord.Message):
-    # Ignore messages from bots (including self)
+    # 1) ignore other bots
     if message.author.bot:
         return
 
-    content = message.content.strip()
-    if not content:
-        return
+    logging.debug(f"📨 Message from {message.author}: {message.content!r}")
 
-    logger.debug(f"📨 Message from {message.author} in {message.channel}: '''{content}'''")
+    # 2) parse the Discord message
+    address, notes, manual_sqft, exit_str, level = parse_address(message.content)
+    logging.info(f"↳ parsed address: '{address}'")
+    logging.debug(f"[PARSE] notes={notes!r}, manual_sqft={manual_sqft}, exit={exit_str!r}, level={level!r}")
 
-    # Parse: first line = address, remaining lines = notes
-    lines = content.splitlines()
-    address = lines[0].strip()
-    notes   = "\n".join(lines[1:]) if len(lines) > 1 else ""
+    # 3) fetch subject data (ZPID + fallback to coords)
+    logging.debug(f"[VAL] get_subject_data for '{address}'")
+    subj, subject = await get_subject_data(address)
+    logging.debug(f"[VAL] subject (pre‐override): {subject}")
 
-    logger.info(f"↳ parsing address: '{address}'")
-
-    # Extract manual Sqft if provided
-    manual_sqft = None
-    match = re.search(r"(?i)\bSqft[:\s]*([0-9,]+)", notes)
-    if match:
-        try:
-            manual_sqft = int(match.group(1).replace(",", ""))
-            logger.info(f"↳ manual Sqft detected: {manual_sqft}")
-        except ValueError:
-            logger.warning(f"↳ invalid manual Sqft value: {match.group(1)}")
-
-    # Get subject info (Zillow + fallbacks)
-    try:
-        subj, subject = await get_subject_data(address)
-        logger.debug(f"↳ get_subject_data -> subj: {subj}, subject: {subject}")
-    except Exception as e:
-        logger.exception("❌ Error in get_subject_data")
-        await message.channel.send(f"❌ Error fetching property data: `{e}`")
-        return
-
-    # Override sqft if user provided
+    # 4) override with manual sqft if provided
     if manual_sqft is not None:
         subject["sqft"] = manual_sqft
-        logger.debug(f"↳ overridden subject['sqft'] to: {manual_sqft}")
+        logging.info(f"↳ manual Sqft detected, overriding subject['sqft'] → {manual_sqft}")
 
-    # Ensure we have a sqft
-    sqft = subject.get("sqft") or 0
-    if sqft == 0:
-        reply = (
-            f"⚠️ Could not determine square footage for `{address}`.\n"
-            "Please include it manually, e.g.: `Sqft: 1200`"
-        )
-        logger.info("↳ prompting user for sqft")
+    # 5) attempt Zillow comps first
+    zpid = subj.get("zpid")
+    clean_comps, avg_psf = [], 0.0
+    if zpid:
+        comps_raw = fetch_zillow_comps(zpid)
+        logging.debug(f"[VAL] fetched {len(comps_raw)} raw Zillow comps")
+        clean_comps, avg_psf = get_clean_comps(subject, comps_raw)
+        logging.debug(f"[VAL] after Zillow filtering → {len(clean_comps)} comps, avg_psf={avg_psf:.2f}")
+
+    # 6) if no Zillow comps, try ATTOM
+    if not clean_comps:
+        logging.info("↳ no Zillow comps found, falling back to ATTOM")
+        attom_raw = fetch_attom_comps(address)
+        logging.debug(f"[VAL] fetched {len(attom_raw)} raw ATTOM comps")
+        clean_comps, avg_psf = get_clean_comps(subject, attom_raw)
+        logging.debug(f"[VAL] after ATTOM filtering → {len(clean_comps)} comps, avg_psf={avg_psf:.2f}")
+
+    # 7) reply
+    if not clean_comps:
+        # still nothing?
+        reply = f"⚠️ No comparable sales found for `{address}`."
+        logging.info(f"↳ sending reply: {reply}")
         await message.channel.send(reply)
         return
 
-    # Fetch comps list if ZPID available
-    comps_raw = []
-    zpid = subj.get("zpid")
-    if zpid:
-        try:
-            comps_raw = fetch_zillow_comps(zpid)
-            logger.debug(f"↳ fetched raw comps: {comps_raw}")
-        except Exception as e:
-            logger.exception("❌ Error fetching comps from Zillow")
-
-    # Clean and filter comps
-    try:
-        clean_comps, avg_psf = get_clean_comps(subject, comps_raw)
-        logger.debug(f"↳ clean_comps: {clean_comps}, avg_psf: {avg_psf}")
-    except Exception as e:
-        logger.exception("❌ Error in get_clean_comps")
-        await message.channel.send(f"❌ Error processing comparables: `{e}`")
-        return
-
-    # If no comps found, notify and return
-    if not clean_comps:
-        logger.info(f"↳ no comps found for {address}")
-        await message.channel.send(f"⚠️ No comparable sales found for `{address}`.")
-        return
-
-    # Build embed for results
+    # 8) build the embed
     embed = discord.Embed(
-        title=f"📊 Comps for {address}",
-        description=f"Subject Sqft: **{sqft}** | Avg $/sqft: **${avg_psf:.2f}**",
-        color=0x00FF00,
-        timestamp=datetime.utcnow(),
+        title=f"🏘 Comparable Sales for {address}",
+        color=0x2ecc71,
     )
-    for comp in clean_comps:
-        embed.add_field(
-            name=f"{comp['address']} ({comp['grade']})",
-            value=(
-                f"${comp['sold_price']:,}  |  "
-                f"{comp['sqft']} sqft  |  "
-                f"{comp['beds']}bd/{comp['baths']}ba  |  "
-                f"[Zillow]({comp['zillow_url']})"
-            ),
-            inline=False,
-        )
+    embed.add_field(name="Subject Sqft", value=subject["sqft"], inline=True)
+    embed.add_field(name="Avg $/Sqft", value=f"${avg_psf:,.2f}", inline=True)
+    embed.add_field(name="Notes", value=notes or "—", inline=False)
+    embed.add_field(name="Exit", value=exit_str or "—", inline=True)
+    embed.add_field(name="Level", value=level or "—", inline=True)
 
-    logger.info("↳ sending comps embed")
+    for comp in clean_comps:
+        desc = (
+            f"💰 ${comp['sold_price']:,}\n"
+            f"📐 {comp['sqft']} sqft\n"
+            f"🛏 {comp['beds']} | 🛁 {comp['baths']}\n"
+            f"Grade: {comp['grade']}"
+        )
+        embed.add_field(name=comp["address"], value=desc, inline=False)
+        embed.add_field(name="🔗 Link", value=comp["zillow_url"], inline=False)
+
+    logging.info("↳ sending comps embed")
     await message.channel.send(embed=embed)
 
-# ─── Bot Start ──────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    logger.info("🔌 Starting bot…")
     bot.run(DISCORD_TOKEN)
