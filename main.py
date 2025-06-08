@@ -7,7 +7,8 @@ import asyncio
 from datetime import datetime
 from utils.address_tools import get_coordinates
 from utils.zpid_finder import find_zpid_by_address_async
-from utils.valuation import get_comp_summary    # <-- fixed import!
+from utils.valuation import get_comp_summary  # corrected path
+
   
 # Configure logging
 logging.basicConfig(
