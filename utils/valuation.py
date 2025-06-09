@@ -30,15 +30,14 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
 
     # 1) Geocode via Google
     gmaps_info = get_coordinates(address)
-    if gmaps_info:
-        subject_info.update({
-            "latitude": gmaps_info.get("lat"),
-            "longitude": gmaps_info.get("lng"),
-            "address_components": gmaps_info.get("components"),
-            "address": gmaps_info.get("formatted")
-        })
-    else:
+    if not gmaps_info:
         return {}, {}
+    subject_info.update({
+        "latitude": gmaps_info.get("lat"),
+        "longitude": gmaps_info.get("lng"),
+        "address_components": gmaps_info.get("components"),
+        "address": gmaps_info.get("formatted")
+    })
 
     # 2) Zillow details if ZPID available
     if zpid:
@@ -90,7 +89,7 @@ async def fetch_attom_fallback(subject: dict, radius: int = 10, count: int = 50)
     if lat is None or lon is None:
         return []
 
-    # Try transactions first
+    # Try ATTOM transactions endpoint
     tx_url = f"https://{ATTOM_HOST}/propertyapi/v1.0.0/sale/transactions"
     params = {"latitude": lat, "longitude": lon, "radius": radius, "pageSize": count}
     try:
@@ -128,83 +127,34 @@ def extract_last_sale(history: dict) -> Tuple[float, str]:
     return latest.get("price", 0.0), latest.get("date", "")
 
 
-def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float]:
-    if not subject.get("latitude") or not subject.get("longitude"):
-        return [], 0.0
+```python
+# Temporarily comment out ATTOM fallback in get_comp_summary
+```
 
-    s_lat, s_lon = float(subject["latitude"]), float(subject["longitude"])
-    tiers = [(1, "A+"), (2, "B+"), (3, "C+"), (5, "D+"), (10, "F")]
-    cutoff = datetime.now() - timedelta(days=365)
-    out: List[dict] = []
+```diff
+ async def get_comp_summary(address: str, manual_sqft: int = None) -> Tuple[List[dict], float, int]:
+     subj_ids, subject = await get_subject_data(address)
+     if manual_sqft:
+         subject["sqft"] = manual_sqft
 
-    for c in comps:
-        is_attom = "identifier" in c
-        prop = (c.get("property") or [c])[0] if is_attom else c
-        cid = prop.get("zpid") or (c.get("identifier") or {}).get("attomId")
-        if not cid:
-            continue
+     raw: List[dict] = []
+     if subj_ids.get("zpid"):
+         raw = await fetch_zillow_comps(subj_ids["zpid"])
 
-        try:
-            lat2 = float(prop.get("latitude") or prop.get("location", {}).get("latitude"))
-            lon2 = float(prop.get("longitude") or prop.get("location", {}).get("longitude"))
-            dist = haversine((s_lat, s_lon), (lat2, lon2), unit=Unit.MILES)
-        except:
-            continue
+-    if not raw:
+-        raw = await fetch_attom_fallback(subject)
++    # if not raw:
++    #     raw = await fetch_attom_fallback(subject)
 
-        grade = next((g for r, g in tiers if dist <= r), None)
-        if not grade:
-            continue
+     if not raw:
+         return [], 0.0, subject.get("sqft") or 0
 
-        raw = (c.get("sale") or {}).get("saleDate") or prop.get("lastSoldDate")
-        if not raw:
-            continue
+     comps, _ = get_clean_comps(subject, raw)
 
-        try:
-            if isinstance(raw, (int, float)):
-                sd = datetime.utcfromtimestamp(raw / 1000)
-            else:
-                ds = str(raw).rstrip("Z")
-                try:
-                    sd = datetime.fromisoformat(ds)
-                except:
-                    sd = datetime.strptime(ds[:10], "%Y-%m-%d")
-        except:
-            continue
+     for comp in comps:
+         hist = await fetch_price_and_tax_history(comp["id"])
+         price, date = extract_last_sale(hist)
+         comp["last_sold_price"] = price
+         comp["last_sold_date"] = date
 
-        if sd < cutoff:
-            continue
-
-        out.append({
-            "id":        cid,
-            "grade":     grade,
-            "distance":  round(dist, 2),
-            "sale_date": sd.isoformat()
-        })
-
-    return out, 0.0
-
-async def get_comp_summary(address: str, manual_sqft: int = None) -> Tuple[List[dict], float, int]:
-    subj_ids, subject = await get_subject_data(address)
-    if manual_sqft:
-        subject["sqft"] = manual_sqft
-
-    raw: List[dict] = []
-    if subj_ids.get("zpid"):
-        raw = await fetch_zillow_comps(subj_ids["zpid"])
-
-    # Commenting out ATTOM fallback to isolate Zillow flow
-    # if not raw:
-    #     raw = await fetch_attom_fallback(subject)
-
-    if not raw:
-        return [], 0.0, subject.get("sqft") or 0
-
-    comps, _ = get_clean_comps(subject, raw)
-
-    for comp in comps:
-        hist = await fetch_price_and_tax_history(comp["id"])
-        price, date = extract_last_sale(hist)
-        comp["last_sold_price"] = price
-        comp["last_sold_date"] = date
-
-    return comps, 0.0, subject.get("sqft") or 0
+     return comps, 0.0, subject.get("sqft") or 0
