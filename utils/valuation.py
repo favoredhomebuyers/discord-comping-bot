@@ -46,7 +46,6 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
             })
             
     if not all(subject_info.get(k) for k in ["sqft", "beds", "baths", "year"]):
-        print("[INFO VAL] Zillow details incomplete, using ATTOM fallback for subject property...")
         attom_subject_list = await fetch_attom_comps_fallback(subject_info, radius=0.1)
         if attom_subject_list:
             prop_details = (attom_subject_list[0].get("property") or [{}])[0]
@@ -65,13 +64,11 @@ async def fetch_property_details(zpid: str) -> dict:
         return resp.json() if resp.status_code == 200 else {}
     except httpx.RequestError: return {}
 
-
 async def fetch_zillow_comps(zpid: str) -> List[dict]:
     details = await fetch_property_details(zpid)
-    if isinstance(details.get("comps"), list) and details["comps"]:
+    if isinstance(details.get("comps"), list):
         return details.get("comps", [])
     
-    print("[INFO VAL] No comps in property details, trying dedicated /propertyComps endpoint.")
     url = f"https://{ZILLOW_HOST}/propertyComps"
     try:
         resp = await client.get(url, headers=Z_HEADERS, params={"zpid": zpid, "count": 20})
@@ -92,78 +89,81 @@ async def fetch_attom_comps_fallback(subject: dict, radius: int = 5, count: int 
     try:
         resp = await client.get(url, headers=A_HEADERS, params=params)
         if resp.status_code != 200:
-            print(f"[WARNING VAL] ATTOM fallback failed: {resp.status_code} - {resp.text}")
             return []
         return resp.json().get("property", [])
-    except httpx.RequestError as e:
-        print(f"[ERROR VAL] HTTP error on ATTOM fallback: {e}")
-        return []
+    except httpx.RequestError: return []
 
 def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float]:
-    """
-    DEBUGGING VERSION: This function only filters by distance tiers and grades.
-    """
-    if not all(subject.get(k) for k in ["latitude", "longitude"]):
+    if not all(subject.get(k) for k in ["latitude", "longitude", "sqft", "year"]):
         return [], 0.0
 
-    s_lat, s_lon = float(subject["latitude"]), float(subject["longitude"])
-    
+    s_lat, s_lon, actual_sqft, actual_year = float(subject["latitude"]), float(subject["longitude"]), subject["sqft"], subject["year"]
     tiers = [(1, "A+"), (2, "B+"), (3, "C+"), (5, "D+"), (10, "F")]
+    
     chosen = []
     chosen_ids = set()
 
     for radius, grade in tiers:
-        if len(chosen) >= 3:
-            break
-        
+        if len(chosen) >= 3: break
         for comp_data in comps:
             is_attom = "identifier" in comp_data
             prop_details = (comp_data.get("property") or [comp_data])[0] if is_attom else comp_data
-
+            
             comp_id = prop_details.get("zpid") or (prop_details.get("identifier") or {}).get("attomId")
-            if not comp_id or comp_id in chosen_ids:
-                continue
+            if not comp_id or comp_id in chosen_ids: continue
 
             try:
                 lat2 = float(prop_details.get("latitude") or (prop_details.get("location", {}) or {}).get("latitude"))
                 lon2 = float(prop_details.get("longitude") or (prop_details.get("location", {}) or {}).get("longitude"))
-            except (ValueError, TypeError):
-                continue
-            
-            distance = haversine((s_lat, s_lon), (lat2, lon2), unit=Unit.MILES)
+                distance = haversine((s_lat, s_lon), (lat2, lon2), unit=Unit.MILES)
+            except (ValueError, TypeError): continue
 
-            if distance <= radius:
-                chosen.append({**comp_data, "id": comp_id, "grade": grade})
-                chosen_ids.add(comp_id)
-                if len(chosen) >= 3:
-                    break
+            if distance > radius: continue
+
+            # If it's within this tier's radius and not already chosen, add it.
+            chosen.append({**comp_data, "id": comp_id, "grade": grade, "distance": distance})
+            chosen_ids.add(comp_id)
+
+            if len(chosen) >= 3: break
+
+    if not chosen: return [], 0.0
     
-    if not chosen:
-        return [], 0.0
+    # Now we filter the chosen comps by property characteristics
+    final_comps = []
+    for comp in sorted(chosen, key=lambda x: x["distance"]):
+        if len(final_comps) >= 3: break
+        
+        is_attom = "identifier" in comp
+        prop_details = (comp.get("property") or [comp])[0] if is_attom else comp
+
+        sqft = (prop_details.get("building", {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea")
+        year = (prop_details.get("summary", {}) or {}).get("yearbuilt") or prop_details.get("yearBuilt")
+        sold = (comp.get("sale", {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice")
+
+        if not all([sqft, year, sold]): continue
+
+        if abs(sqft - actual_sqft) > 400: continue
+        if abs(year - actual_year) > 20: continue
+
+        final_comps.append(comp)
 
     psfs = []
     formatted = []
-    for comp in chosen:
+    for comp in final_comps:
         is_attom = "identifier" in comp
         prop_details = (comp.get("property") or [comp])[0] if is_attom else comp
+        sold = (comp.get("sale", {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice")
+        sqft = (prop_details.get("building", {}) or {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea")
         
-        sold = (comp.get("sale", {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice") or 0
-        sqft = (prop_details.get("building", {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea") or 0
+        psf = sold / sqft if sold and sqft else 0
+        psfs.append(psf)
         
-        if sold and sqft:
-            psf = sold / sqft
-            psfs.append(psf)
-        else:
-            psf = 0
-            
         comp_address = prop_details.get("address", {})
         formatted.append({
-            "address": comp_address.get("oneLine") or prop_details.get("streetAddress", "Address Not Available"),
-            "sold_price": int(sold), 
-            "sqft": int(sqft), 
-            "psf": round(psf, 2),
-            "grade": comp.get("grade", "N/A"),
-            "zillow_url": f"https://www.zillow.com/homedetails/{prop_details.get('zpid')}_zpid/" if prop_details.get('zpid') else "#"
+            "address": comp_address.get("oneLine") or prop_details.get("streetAddress"),
+            "sold_price": int(sold), "sqft": int(sqft), "psf": round(psf, 2),
+            "grade": comp.get("grade"), # Add grade to final output
+            "distance": comp.get("distance"), # Add distance to final output
         })
         
     avg_psf = sum(psfs) / len(psfs) if psfs else 0
