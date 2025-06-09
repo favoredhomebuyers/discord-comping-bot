@@ -15,9 +15,9 @@ logger = logging.getLogger("PricingDeptBot")
 
 # --- Constants and Headers ---
 ZILLOW_HOST = os.getenv("ZILLOW_RAPIDAPI_HOST", "zillow-com1.p.rapidapi.com")
-ZILLOW_KEY = os.getenv("ZILLOW_RAPIDAPI_KEY")
-ATTOM_HOST = os.getenv("ATTOM_HOST", "api.gateway.attomdata.com")
-ATTOM_KEY = os.getenv("ATTOM_API_KEY")
+ZILLOW_KEY  = os.getenv("ZILLOW_RAPIDAPI_KEY")
+ATTOM_HOST  = os.getenv("ATTOM_HOST",    "api.gateway.attomdata.com")
+ATTOM_KEY   = os.getenv("ATTOM_API_KEY")
 
 Z_HEADERS = {"x-rapidapi-host": ZILLOW_HOST, "x-rapidapi-key": ZILLOW_KEY}
 A_HEADERS = {"apikey": ATTOM_KEY}
@@ -36,9 +36,9 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
     if not coords:
         return {}, {}
     subject_info.update({
-        "latitude": coords.get("lat"),
+        "latitude":  coords.get("lat"),
         "longitude": coords.get("lng"),
-        "address": coords.get("formatted"),
+        "address":   coords.get("formatted"),
     })
 
     if zpid:
@@ -55,10 +55,10 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
         fb = await fetch_attom_fallback(subject_info, radius=0.1, count=1)
         if fb:
             prop = (fb[0].get("property") or [fb[0]])[0]
-            subject_info.setdefault("sqft", (prop.get("building") or {}).get("size", {}).get("bldgsize"))
-            subject_info.setdefault("beds", (prop.get("building") or {}).get("rooms", {}).get("beds"))
+            subject_info.setdefault("sqft",  (prop.get("building") or {}).get("size", {}).get("bldgsize"))
+            subject_info.setdefault("beds",  (prop.get("building") or {}).get("rooms", {}).get("beds"))
             subject_info.setdefault("baths", (prop.get("building") or {}).get("rooms", {}).get("bathstotal"))
-            subject_info.setdefault("year", (prop.get("summary") or {}).get("yearbuilt"))
+            subject_info.setdefault("year",  (prop.get("summary")  or {}).get("yearbuilt"))
 
     return subj_ids, subject_info
 
@@ -87,10 +87,9 @@ async def fetch_zillow_comps(zpid: str) -> List[dict]:
             if resp.status_code != 200:
                 return []
             data = resp.json()
-            # Debug: log raw payload
-            logger.debug(f"[DEBUG raw payload] {json.dumps(data, indent=2)}")
+            # **DEBUG OUTPUT** – you’ll see this in your INFO logs
+            logger.info(f"[DEBUG raw payload] {json.dumps(data, indent=2)}")
             comps = data.get("comparables") or data.get("results") or []
-            # Debug: log parsed comp count
             logger.info(f"[DEBUG] Parsed {len(comps)} comps from Zillow")
             return comps
         except httpx.RequestError:
@@ -103,7 +102,6 @@ async def fetch_attom_fallback(subject: dict, radius: int = 10, count: int = 50)
     if lat is None or lon is None:
         return []
 
-    # Transactions endpoint (validate path in ATTOM docs)
     tx_url = f"https://{ATTOM_HOST}/propertyapi/v1.0.0/sale/transactions"
     params = {"latitude": lat, "longitude": lon, "radius": radius, "pageSize": count}
     try:
@@ -113,7 +111,6 @@ async def fetch_attom_fallback(subject: dict, radius: int = 10, count: int = 50)
     except httpx.RequestError:
         pass
 
-    # Snapshot fallback
     snap_url = f"https://{ATTOM_HOST}/propertyapi/v1.0.0/sale/snapshot"
     try:
         resp2 = await client.get(snap_url, headers=A_HEADERS, params=params)
@@ -188,10 +185,10 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             continue
 
         filtered.append({
-            "id":         cid,
-            "grade":      grade,
-            "distance":   round(dist, 2),
-            "sale_date":  sd.isoformat(),
+            "id":        cid,
+            "grade":     grade,
+            "distance":  round(dist, 2),
+            "sale_date": sd.isoformat(),
         })
 
     return filtered, 0.0
@@ -206,19 +203,17 @@ async def get_comp_summary_by_zpid(
 
     raw = await fetch_zillow_comps(zpid)
     if not raw:
-        # Optionally re-enable ATTOM fallback here
-        raw = []
+        raw = []  # ATTOM fallback disabled for now
 
     if not raw:
         return [], 0.0, subject.get("sqft") or 0
 
     comps, _ = get_clean_comps(subject, raw)
 
-    # Enrich with last sale price & date
     for comp in comps:
         history = await fetch_price_and_tax_history(comp["id"])
         price, date = extract_last_sale(history)
         comp["last_sold_price"] = price
-        comp["last_sold_date"] = date
+        comp["last_sold_date"]  = date
 
     return comps, 0.0, subject.get("sqft") or 0
