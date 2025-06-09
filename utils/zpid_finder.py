@@ -1,6 +1,6 @@
-# utils/zpid_finder.py
 import os
 import httpx
+import json
 from typing import Optional
 
 # must match your ZILLOW_HOST and Z_HEADERS in valuation.py
@@ -12,19 +12,27 @@ client = httpx.AsyncClient(timeout=30.0)
 
 async def find_zpid_by_address_async(address: str) -> Optional[str]:
     """
-    Uses Zillow’s propertyExtendedSearch to find the zpid for a given address.
+    Uses Zillow’s propertyExtendedSearch to find the zpid for a given address,
+    with debug logging to inspect the response payload.
     """
     url = f"https://{ZILLOW_HOST}/propertyExtendedSearch"
     try:
         resp = await client.get(url, headers=Z_HEADERS, params={"location": address})
         if resp.status_code != 200:
-            print(f"[ERROR ZPID] status {resp.status_code}")
+            print(f"[ERROR ZPID] propertyExtendedSearch status {resp.status_code}")
             return None
         data = resp.json()
-        # Zillow may return under "results" or "list" depending on version
-        hits = data.get("results") or data.get("list") or []
+        # Debug: log keys
+        print(f"[DEBUG ZPID] response keys: {list(data.keys())}")
+        # Try known container keys
+        hits = data.get("results") or data.get("list") or data.get("props") or []
+        # Some payloads nest under props.list
+        if not hits and isinstance(data.get("props"), dict):
+            hits = data["props"].get("list", [])
         if hits:
-            return hits[0].get("zpid")
+            zpid = hits[0].get("zpid")
+            print(f"[DEBUG ZPID] found zpid: {zpid}")
+            return zpid
     except Exception as e:
-        print(f"[ERROR ZPID] {e}")
+        print(f"[ERROR ZPID] exception: {e}")
     return None
