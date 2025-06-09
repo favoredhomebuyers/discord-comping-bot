@@ -67,7 +67,7 @@ async def fetch_property_details(zpid: str) -> dict:
 
 async def fetch_zillow_comps(zpid: str) -> List[dict]:
     details = await fetch_property_details(zpid)
-    if isinstance(details.get("comps"), list):
+    if isinstance(details.get("comps"), list) and details["comps"]:
         return details.get("comps", [])
     
     url = f"https://{ZILLOW_HOST}/propertyComps"
@@ -77,6 +77,7 @@ async def fetch_zillow_comps(zpid: str) -> List[dict]:
         data = resp.json()
         return data.get("results", []) or data.get("comparables", [])
     except httpx.RequestError: return []
+
 
 async def fetch_attom_comps_fallback(subject: dict, radius: int = 5, count: int = 50) -> List[dict]:
     lat = subject.get("latitude")
@@ -97,64 +98,72 @@ async def fetch_attom_comps_fallback(subject: dict, radius: int = 5, count: int 
         return []
 
 def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float]:
-    if not all(subject.get(k) for k in ["latitude", "longitude", "sqft", "year"]):
+    """
+    DEBUGGING VERSION: This function only filters by distance tiers and grades.
+    All other filters (sale date, sqft, year) are removed.
+    """
+    if not all(subject.get(k) for k in ["latitude", "longitude"]):
         return [], 0.0
 
-    s_lat, s_lon, actual_sqft, actual_year = float(subject["latitude"]), float(subject["longitude"]), subject["sqft"], subject["year"]
-    one_year_ago = datetime.now() - timedelta(days=365)
+    s_lat, s_lon = float(subject["latitude"]), float(subject["longitude"])
     
-    filtered_comps = []
-    for comp_data in comps:
-        prop_details = (comp_data.get("property") or [comp_data])[0]
+    tiers = [(1, "A+"), (2, "B+"), (3, "C+"), (5, "D+"), (10, "F")]
+    chosen = []
+    chosen_ids = set()
+
+    for radius, grade in tiers:
+        if len(chosen) >= 3: break
         
-        sale_date_str = (comp_data.get("sale") or {}).get("amount", {}).get("saleRecDate") or prop_details.get("lastSoldDate")
-        if sale_date_str:
+        for comp_data in comps:
+            if len(chosen) >= 3: break
+            
+            is_attom = "identifier" in comp_data
+            prop_details = (comp_data.get("property") or [comp_data])[0] if is_attom else comp_data
+
+            comp_id = prop_details.get("zpid") or (prop_details.get("identifier") or {}).get("attomId")
+            if not comp_id or comp_id in chosen_ids:
+                continue
+
             try:
-                sale_date = datetime.fromtimestamp(sale_date_str / 1000) if isinstance(sale_date_str, int) else datetime.strptime(sale_date_str, "%Y-%m-%d")
-                if sale_date < one_year_ago: continue
-            except (ValueError, TypeError): continue
-        else: continue
-        
-        # Corrected the line with the syntax error
-        sqft = ((prop_details.get("building", {}) or {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea")
-        year = (prop_details.get("summary", {}) or {}).get("yearbuilt") or prop_details.get("yearBuilt")
-        sold = ((comp_data.get("sale") or {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice")
+                lat2 = float(prop_details.get("latitude") or (prop_details.get("location", {}) or {}).get("latitude"))
+                lon2 = float(prop_details.get("longitude") or (prop_details.get("location", {}) or {}).get("longitude"))
+                distance = haversine((s_lat, s_lon), (lat2, lon2), unit=Unit.MILES)
+            except (ValueError, TypeError):
+                continue
+            
+            if distance <= radius:
+                chosen.append({**comp_data, "id": comp_id, "grade": grade, "distance": distance})
+                chosen_ids.add(comp_id)
 
-        if not all([sqft, year, sold]): continue
-
-        if abs(sqft - actual_sqft) > 400: continue
-        if abs(year - actual_year) > 20: continue
-        
-        filtered_comps.append(comp_data)
-
-    if not filtered_comps: return [], 0.0
-        
-    def get_distance(comp):
-        prop_details = (comp.get("property") or [comp])[0]
-        try:
-            lat2 = float((prop_details.get("location", {}) or {}).get("latitude"))
-            lon2 = float((prop_details.get("location", {}) or {}).get("longitude"))
-            return haversine((s_lat, s_lon), (lat2, lon2), unit=Unit.MILES)
-        except (ValueError, TypeError): return float('inf')
-
-    sorted_by_distance = sorted(filtered_comps, key=get_distance)
-    chosen_comps = sorted_by_distance[:3]
+    if not chosen: return [], 0.0
+    
+    # Sort the chosen comps by distance to be sure we have the closest ones
+    sorted_by_distance = sorted(chosen, key=lambda x: x["distance"])
+    final_comps = sorted_by_distance[:3]
 
     psfs = []
     formatted = []
-    for comp in chosen_comps:
-        prop_details = (comp.get("property") or [comp])[0]
-        sold = ((comp.get("sale") or {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice")
-        sqft = ((prop_details.get("building", {}) or {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea")
+    for comp in final_comps:
+        is_attom = "identifier" in comp
+        prop_details = (comp.get("property") or [comp])[0] if is_attom else comp
         
-        if not sold or not sqft: continue
-        psf = sold / sqft
-        psfs.append(psf)
+        sold = (comp.get("sale", {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice") or 0
+        sqft = (prop_details.get("building", {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea") or 0
         
+        if sold and sqft:
+            psf = sold / sqft
+            psfs.append(psf)
+        else:
+            psf = 0
+            
         comp_address = prop_details.get("address", {})
         formatted.append({
-            "address": comp_address.get("oneLine") or prop_details.get("streetAddress"),
-            "sold_price": int(sold), "sqft": int(sqft), "psf": round(psf, 2),
+            "address": comp_address.get("oneLine") or prop_details.get("streetAddress", "Address Not Available"),
+            "sold_price": int(sold), 
+            "sqft": int(sqft), 
+            "psf": round(psf, 2),
+            "grade": comp.get("grade", "N/A"),
+            "zillow_url": f"https://www.zillow.com/homedetails/{prop_details.get('zpid')}_zpid/" if prop_details.get('zpid') else "#"
         })
         
     avg_psf = sum(psfs) / len(psfs) if psfs else 0
