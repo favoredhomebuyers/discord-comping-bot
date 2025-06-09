@@ -65,25 +65,44 @@ async def fetch_property_details(zpid: str) -> dict:
     return {}
 
 async def fetch_zillow_comps(zpid: str) -> List[dict]:
+    """
+    Fetch comps with retry on 429, then extract dynamically.
+    """
     logger.info(f"[DEBUG] ▶️ fetch_zillow_comps called with zpid={zpid}")
     url = f"https://{ZILLOW_HOST}/propertyComps"
-    resp = await client.get(url, headers=Z_HEADERS, params={"zpid": zpid, "count": 20})
-    if resp.status_code != 200:
-        return []
-    data = resp.json()
-    logger.info(f"[DEBUG raw payload] {json.dumps(data, indent=2)}")
+    
+    for attempt in range(3):
+        try:
+            resp = await client.get(url, headers=Z_HEADERS, params={"zpid": zpid, "count": 20})
+            if resp.status_code == 429:
+                wait = 2 ** attempt
+                logger.info(f"[DEBUG] 429 received, retrying after {wait}s")
+                await asyncio.sleep(wait)
+                continue
+            if resp.status_code != 200:
+                logger.error(f"[ERROR] fetch_zillow_comps status {resp.status_code}")
+                return []
 
-    if isinstance(data, list):
-        comps = data
-    else:
-        comps = data.get("comps") or data.get("comparables") or data.get("results") or []
-        if not comps:
-            for v in data.values():
-                if isinstance(v, list):
-                    comps = v
-                    break
-    logger.info(f"[DEBUG] Parsed {len(comps)} comps from Zillow")
-    return comps or []
+            data = resp.json()
+            logger.info(f"[DEBUG raw payload] {json.dumps(data, indent=2)}")
+
+            # dynamic extract
+            if isinstance(data, list):
+                comps = data
+            else:
+                comps = data.get("comps") or data.get("comparables") or data.get("results") or []
+                if not comps:
+                    for v in data.values():
+                        if isinstance(v, list):
+                            comps = v
+                            break
+            logger.info(f"[DEBUG] Parsed {len(comps)} comps from Zillow")
+            return comps or []
+        except httpx.RequestError as e:
+            logger.error(f"[ERROR] fetch_zillow_comps request failed: {e}")
+            break
+    logger.error(f"[ERROR] fetch_zillow_comps giving up after retries for zpid={zpid}")
+    return []
 
 async def fetch_price_and_tax_history(zpid: str) -> dict:
     url = f"https://{ZILLOW_HOST}/priceAndTaxHistory"
