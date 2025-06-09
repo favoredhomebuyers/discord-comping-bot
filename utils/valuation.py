@@ -1,4 +1,3 @@
-# utils/valuation.py
 import os
 import asyncio
 import httpx
@@ -45,7 +44,7 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
                 "baths": details.get("bathrooms"),
                 "year": details.get("yearBuilt"),
             })
-            
+
     if not all(subject_info.get(k) for k in ["sqft", "beds", "baths", "year"]):
         attom_subject_list = await fetch_attom_comps_fallback(subject_info, radius=0.1)
         if attom_subject_list:
@@ -63,30 +62,31 @@ async def fetch_property_details(zpid: str) -> dict:
     try:
         resp = await client.get(url, headers=Z_HEADERS, params={"zpid": zpid})
         return resp.json() if resp.status_code == 200 else {}
-    except httpx.RequestError: return {}
-
+    except httpx.RequestError:
+        return {}
 
 async def fetch_zillow_comps(zpid: str) -> List[dict]:
     details = await fetch_property_details(zpid)
     if isinstance(details.get("comps"), list) and details["comps"]:
         return details.get("comps", [])
-    
     url = f"https://{ZILLOW_HOST}/propertyComps"
     try:
         resp = await client.get(url, headers=Z_HEADERS, params={"zpid": zpid, "count": 20})
-        if resp.status_code != 200: return []
+        if resp.status_code != 200:
+            return []
         data = resp.json()
         return data.get("results", []) or data.get("comparables", [])
-    except httpx.RequestError: return []
+    except httpx.RequestError:
+        return []
 
 async def fetch_attom_comps_fallback(subject: dict, radius: int = 10, count: int = 50) -> List[dict]:
     lat = subject.get("latitude")
     lon = subject.get("longitude")
-    if not lat or not lon: return []
+    if not lat or not lon:
+        return []
 
     url = f"https://{ATTOM_HOST}/propertyapi/v1.0.0/sale/snapshot"
     params = {"latitude": lat, "longitude": lon, "radius": radius, "pageSize": count}
-    
     try:
         resp = await client.get(url, headers=A_HEADERS, params=params)
         if resp.status_code != 200:
@@ -97,87 +97,78 @@ async def fetch_attom_comps_fallback(subject: dict, radius: int = 10, count: int
         print(f"[ERROR VAL] HTTP error on ATTOM fallback: {e}")
         return []
 
+
 def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float]:
+    """
+    Simplified comp filtering: keep comps by location tiers with grade and sale date within last 12 months.
+    """
     if not all(subject.get(k) for k in ["latitude", "longitude"]):
         return [], 0.0
 
-    s_lat, s_lon, subject_address = float(subject["latitude"]), float(subject["longitude"]), subject.get("address")
+    s_lat = float(subject["latitude"])
+    s_lon = float(subject["longitude"])
     tiers = [(1, "A+"), (2, "B+"), (3, "C+"), (5, "D+"), (10, "F")]
-    chosen = []
-    chosen_ids = set()
+    twelve_months_ago = datetime.now() - timedelta(days=365)
+    filtered = []
 
     for comp_data in comps:
         is_attom = "identifier" in comp_data
-        prop_details = (comp_data.get("property") or [comp_data])[0] if is_attom else comp_data
+        prop = (comp_data.get("property") or [comp_data])[0] if is_attom else comp_data
 
-        comp_id = prop_details.get("zpid") or (prop_details.get("identifier") or {}).get("attomId")
-        if not comp_id or comp_id in chosen_ids:
-            continue
-        
-        # FIX: Filter out the subject property itself
-        comp_address_obj = prop_details.get("address", {})
-        comp_oneline_address = comp_address_obj.get("oneLine") or f"{comp_address_obj.get('line1', '')} {comp_address_obj.get('line2', '')}"
-        if subject_address and comp_oneline_address.strip().lower() == subject_address.strip().lower():
+        comp_id = prop.get("zpid") or (comp_data.get("identifier") or {}).get("attomId")
+        if not comp_id:
             continue
 
+        # Calculate distance
         try:
-            lat2 = float(prop_details.get("latitude") or (prop_details.get("location", {}) or {}).get("latitude"))
-            lon2 = float(prop_details.get("longitude") or (prop_details.get("location", {}) or {}).get("longitude"))
+            lat2 = float(prop.get("latitude") or (prop.get("location", {}) or {}).get("latitude"))
+            lon2 = float(prop.get("longitude") or (prop.get("location", {}) or {}).get("longitude"))
             distance = haversine((s_lat, s_lon), (lat2, lon2), unit=Unit.MILES)
         except (ValueError, TypeError):
             continue
-            
-        found_grade = ""
-        for radius, grade in tiers:
+
+        # Determine grade by tiers
+        grade = None
+        for radius, g in tiers:
             if distance <= radius:
-                found_grade = grade
+                grade = g
                 break
-        
-        if found_grade:
-            chosen.append({**comp_data, "id": comp_id, "grade": found_grade, "distance": distance})
-            chosen_ids.add(comp_id)
+        if not grade:
+            continue
 
-    if not chosen:
-        return [], 0.0
-    
-    sorted_by_distance = sorted(chosen, key=lambda x: x["distance"])
-    final_comps = sorted_by_distance[:3]
+        # Extract sale date
+        sale_date_str = (comp_data.get("sale", {}) or {}).get("saleDate") or prop.get("lastSoldDate")
+        if not sale_date_str:
+            continue
+        try:
+            sale_date = datetime.fromisoformat(sale_date_str)
+        except ValueError:
+            try:
+                sale_date = datetime.strptime(sale_date_str[:10], "%Y-%m-%d")
+            except Exception:
+                continue
+        # Filter by last 12 months
+        if sale_date < twelve_months_ago:
+            continue
 
-    psfs = []
-    formatted = []
-    for comp in final_comps:
-        is_attom = "identifier" in comp
-        prop_details = (comp.get("property") or [comp])[0] if is_attom else comp
-        
-        # Correctly parse sale and sqft data
-        sold = (comp.get("sale", {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice")
-        sqft = (prop_details.get("building", {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea")
-        
-        if not sold or not sqft: continue
-
-        psf = sold / sqft
-        psfs.append(psf)
-        
-        comp_address = prop_details.get("address", {})
-        formatted.append({
-            "address": comp_address.get("oneLine") or prop_details.get("streetAddress", "Address Not Available"),
-            "sold_price": int(sold), "sqft": int(sqft), "psf": round(psf, 2),
-            "grade": comp.get("grade"),
-            "distance": comp.get("distance"),
-            "zillow_url": f"https://www.zillow.com/homedetails/{prop_details.get('zpid')}_zpid/" if prop_details.get('zpid') else "#"
+        filtered.append({
+            "id": comp_id,
+            "grade": grade,
+            "distance": distance,
+            "sale_date": sale_date_str
         })
-        
-    avg_psf = sum(psfs) / len(psfs) if psfs else 0
-    return formatted, avg_psf
+
+    return filtered, 0.0
 
 async def get_comp_summary(address: str, manual_sqft: int = None) -> Tuple[List[dict], float, int]:
     subj_ids, subject = await get_subject_data(address)
-    if manual_sqft: subject["sqft"] = manual_sqft
-        
+    if manual_sqft:
+        subject["sqft"] = manual_sqft
+
     raw_comps = []
     if subj_ids.get("zpid"):
         raw_comps = await fetch_zillow_comps(subj_ids["zpid"])
-            
+
     if not raw_comps:
         print("[INFO VAL] Zillow returned no comps, trying ATTOM fallback.")
         raw_comps = await fetch_attom_comps_fallback(subject)
@@ -186,5 +177,4 @@ async def get_comp_summary(address: str, manual_sqft: int = None) -> Tuple[List[
         return [], 0.0, subject.get("sqft") or 0
 
     clean_comps, avg_psf = get_clean_comps(subject, raw_comps)
-           
     return clean_comps, avg_psf, subject.get("sqft") or 0
