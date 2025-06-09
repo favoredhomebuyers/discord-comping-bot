@@ -64,7 +64,6 @@ async def fetch_property_details(zpid: str) -> dict:
         return resp.json() if resp.status_code == 200 else {}
     except httpx.RequestError: return {}
 
-
 async def fetch_zillow_comps(zpid: str) -> List[dict]:
     details = await fetch_property_details(zpid)
     if isinstance(details.get("comps"), list) and details["comps"]:
@@ -78,8 +77,7 @@ async def fetch_zillow_comps(zpid: str) -> List[dict]:
         return data.get("results", []) or data.get("comparables", [])
     except httpx.RequestError: return []
 
-
-async def fetch_attom_comps_fallback(subject: dict, radius: int = 5, count: int = 50) -> List[dict]:
+async def fetch_attom_comps_fallback(subject: dict, radius: int = 10, count: int = 50) -> List[dict]:
     lat = subject.get("latitude")
     lon = subject.get("longitude")
     if not lat or not lon: return []
@@ -98,10 +96,6 @@ async def fetch_attom_comps_fallback(subject: dict, radius: int = 5, count: int 
         return []
 
 def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float]:
-    """
-    DEBUGGING VERSION: This function only filters by distance tiers and grades.
-    All other filters (sale date, sqft, year) are removed.
-    """
     if not all(subject.get(k) for k in ["latitude", "longitude"]):
         return [], 0.0
 
@@ -111,11 +105,14 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
     chosen = []
     chosen_ids = set()
 
+    # This loop finds the 3 closest properties and assigns a grade
     for radius, grade in tiers:
-        if len(chosen) >= 3: break
+        if len(chosen) >= 3:
+            break
         
         for comp_data in comps:
-            if len(chosen) >= 3: break
+            if len(chosen) >= 3:
+                break
             
             is_attom = "identifier" in comp_data
             prop_details = (comp_data.get("property") or [comp_data])[0] if is_attom else comp_data
@@ -134,10 +131,10 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             if distance <= radius:
                 chosen.append({**comp_data, "id": comp_id, "grade": grade, "distance": distance})
                 chosen_ids.add(comp_id)
-
-    if not chosen: return [], 0.0
     
-    # Sort the chosen comps by distance to be sure we have the closest ones
+    if not chosen:
+        return [], 0.0
+    
     sorted_by_distance = sorted(chosen, key=lambda x: x["distance"])
     final_comps = sorted_by_distance[:3]
 
@@ -163,6 +160,7 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             "sqft": int(sqft), 
             "psf": round(psf, 2),
             "grade": comp.get("grade", "N/A"),
+            "distance": comp.get("distance", 0.0),
             "zillow_url": f"https://www.zillow.com/homedetails/{prop_details.get('zpid')}_zpid/" if prop_details.get('zpid') else "#"
         })
         
