@@ -15,7 +15,7 @@ logger = logging.getLogger("PricingDeptBot")
 async def find_zpid_by_address_async(address: str) -> Optional[str]:
     """
     Uses Zillow’s propertyExtendedSearch to find the zpid for a given address,
-    logging debug info via the bot logger.
+    logging debug info via the bot logger. Handles direct 'zpid' key.
     """
     url = f"https://{ZILLOW_HOST}/propertyExtendedSearch"
     try:
@@ -27,16 +27,23 @@ async def find_zpid_by_address_async(address: str) -> Optional[str]:
         data = resp.json()
         logger.info(f"[DEBUG ZPID] response keys: {list(data.keys())}")
 
-        # Try common containers
+        # Case 1: direct zpid
+        direct = data.get("zpid")
+        if isinstance(direct, (str, int)):
+            logger.info(f"[DEBUG ZPID] found direct zpid: {direct}")
+            return str(direct)
+
+        # Case 2: results or list containers
         hits = data.get("results") or data.get("list") or []
-        # Some versions nest under props.list
+        # Some payloads nest under props.list
         if not hits and isinstance(data.get("props"), dict):
             hits = data["props"].get("list", [])
 
-        if hits:
+        if hits and isinstance(hits, list):
             zpid = hits[0].get("zpid")
-            logger.info(f"[DEBUG ZPID] found zpid: {zpid}")
-            return zpid
+            if zpid:
+                logger.info(f"[DEBUG ZPID] found zpid in list: {zpid}")
+                return str(zpid)
 
     except Exception as e:
         logger.error(f"[ERROR ZPID] exception: {e}")
