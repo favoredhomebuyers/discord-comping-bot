@@ -46,7 +46,6 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
             })
             
     if not all(subject_info.get(k) for k in ["sqft", "beds", "baths", "year"]):
-        print("[INFO VAL] Zillow details incomplete, using ATTOM fallback for subject property...")
         attom_subject_list = await fetch_attom_comps_fallback(subject_info, radius=0.1)
         if attom_subject_list:
             prop_details = (attom_subject_list[0].get("property") or [{}])[0]
@@ -64,6 +63,7 @@ async def fetch_property_details(zpid: str) -> dict:
         resp = await client.get(url, headers=Z_HEADERS, params={"zpid": zpid})
         return resp.json() if resp.status_code == 200 else {}
     except httpx.RequestError: return {}
+
 
 async def fetch_zillow_comps(zpid: str) -> List[dict]:
     details = await fetch_property_details(zpid)
@@ -114,11 +114,11 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
                 if sale_date < one_year_ago: continue
             except (ValueError, TypeError): continue
         else: continue
-
-        # FINAL SYNTAX CORRECTION HERE: Removed extra parenthesis
+        
+        # Corrected the line with the syntax error
         sqft = ((prop_details.get("building", {}) or {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea")
         year = (prop_details.get("summary", {}) or {}).get("yearbuilt") or prop_details.get("yearBuilt")
-        sold = (comp_data.get("sale", {}) or {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice")
+        sold = ((comp_data.get("sale") or {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice")
 
         if not all([sqft, year, sold]): continue
 
@@ -144,8 +144,7 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
     formatted = []
     for comp in chosen_comps:
         prop_details = (comp.get("property") or [comp])[0]
-        sold = (comp.get("sale", {}) or {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice")
-        # FINAL SYNTAX CORRECTION HERE: Removed extra parenthesis
+        sold = ((comp.get("sale") or {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice")
         sqft = ((prop_details.get("building", {}) or {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea")
         
         if not sold or not sqft: continue
