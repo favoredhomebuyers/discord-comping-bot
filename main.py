@@ -14,8 +14,9 @@ logger = logging.getLogger("PricingDeptBot")
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
+# Enable intents, including privileged message content intent
 intents = discord.Intents.default()
-intents.messages = True
+intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -78,7 +79,7 @@ async def price_command(ctx, *, body: str):
     # Build a simple markdown table
     table = ["Grade | Sale Date | Price", "---|---|---"]
     for c in comps:
-        date = c["last_sold_date"][:10] if c.get("last_sold_date") else "N/A"
+        date = c.get("last_sold_date", "N/A")[:10]
         price = f"${c.get('last_sold_price', 0):,}"
         table.append(f"{c['grade']} | {date} | {price}")
 
