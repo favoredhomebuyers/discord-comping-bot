@@ -1,4 +1,3 @@
-# utils/valuation.py
 import os
 import asyncio
 import httpx
@@ -20,23 +19,28 @@ A_HEADERS = {"apikey": ATTOM_KEY}
 
 client = httpx.AsyncClient(timeout=30.0)
 
-
 async def get_subject_data(address: str) -> Tuple[dict, dict]:
+    # Debug: track ZPID lookup
+    print(f"[DEBUG] 🏷  Looking up ZPID for address: {address}")
     zpid = await find_zpid_by_address_async(address)
+    print(f"[DEBUG] 🔍  zpid → {zpid}")
+
     subject_info: Dict[str, Any] = {}
     subj_ids: Dict[str, str] = {}
 
-    # 1) Geocode
-    g = get_coordinates(address)
-    if not g:
+    # 1) Geocode via Google
+    gmaps_info = get_coordinates(address)
+    if gmaps_info:
+        subject_info.update({
+            "latitude": gmaps_info.get("lat"),
+            "longitude": gmaps_info.get("lng"),
+            "address_components": gmaps_info.get("components"),
+            "address": gmaps_info.get("formatted")
+        })
+    else:
         return {}, {}
-    subject_info.update({
-        "latitude":  g["lat"],
-        "longitude": g["lng"],
-        "address":   g["formatted"],
-    })
 
-    # 2) Zillow details if we got a zpid
+    # 2) Zillow details if ZPID available
     if zpid:
         subj_ids["zpid"] = zpid
         details = await fetch_property_details(zpid)
@@ -47,18 +51,17 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
             "year": details.get("yearBuilt"),
         })
 
-    # 3) ATTOM fallback for any missing fields
+    # 3) ATTOM fallback for missing fields
     if not all(subject_info.get(k) for k in ["sqft", "beds", "baths", "year"]):
         fb = await fetch_attom_fallback(subject_info, radius=0.1, count=1)
         if fb:
-            p = (fb[0].get("property") or [fb[0]])[0]
-            subject_info.setdefault("sqft",  (p.get("building") or {}).get("size", {}).get("bldgsize"))
-            subject_info.setdefault("beds",  (p.get("building") or {}).get("rooms", {}).get("beds"))
-            subject_info.setdefault("baths", (p.get("building") or {}).get("rooms", {}).get("bathstotal"))
-            subject_info.setdefault("year",  (p.get("summary")  or {}).get("yearbuilt"))
+            prop = (fb[0].get("property") or [fb[0]])[0]
+            subject_info.setdefault("sqft",  (prop.get("building") or {}).get("size", {}).get("bldgsize"))
+            subject_info.setdefault("beds",  (prop.get("building") or {}).get("rooms", {}).get("beds"))
+            subject_info.setdefault("baths", (prop.get("building") or {}).get("rooms", {}).get("bathstotal"))
+            subject_info.setdefault("year",  (prop.get("summary")  or {}).get("yearbuilt"))
 
     return subj_ids, subject_info
-
 
 async def fetch_property_details(zpid: str) -> dict:
     url = f"https://{ZILLOW_HOST}/property"
@@ -68,11 +71,9 @@ async def fetch_property_details(zpid: str) -> dict:
     except httpx.RequestError:
         return {}
 
-
 async def fetch_zillow_comps(zpid: str) -> List[dict]:
-    """
-    Pulls comparables via Zillow’s propertyComps endpoint.
-    """
+    # Debug: ensure comps endpoint is called
+    print(f"[DEBUG] ▶️ fetch_zillow_comps called with zpid={zpid}")
     url = f"https://{ZILLOW_HOST}/propertyComps"
     try:
         r = await client.get(url, headers=Z_HEADERS, params={"zpid": zpid, "count": 20})
@@ -83,18 +84,13 @@ async def fetch_zillow_comps(zpid: str) -> List[dict]:
     except httpx.RequestError:
         return []
 
-
-async def fetch_attom_fallback(subject: dict,
-                               radius:  int = 10,
-                               count:   int = 50) -> List[dict]:
-    """
-    ATTOM sales transactions fallback. (Calls snapshot if transactions fail.)
-    """
-    lat, lon = subject.get("latitude"), subject.get("longitude")
+async def fetch_attom_fallback(subject: dict, radius: int = 10, count: int = 50) -> List[dict]:
+    lat = subject.get("latitude")
+    lon = subject.get("longitude")
     if lat is None or lon is None:
         return []
 
-    # try transactions
+    # Try transactions first
     tx_url = f"https://{ATTOM_HOST}/propertyapi/v1.0.0/sale/transactions"
     params = {"latitude": lat, "longitude": lon, "radius": radius, "pageSize": count}
     try:
@@ -104,7 +100,7 @@ async def fetch_attom_fallback(subject: dict,
     except httpx.RequestError:
         pass
 
-    # fallback to snapshot (quietly)
+    # Fallback to snapshot
     snap_url = f"https://{ATTOM_HOST}/propertyapi/v1.0.0/sale/snapshot"
     try:
         r2 = await client.get(snap_url, headers=A_HEADERS, params=params)
@@ -115,7 +111,6 @@ async def fetch_attom_fallback(subject: dict,
 
     return []
 
-
 async def fetch_price_and_tax_history(zpid: str) -> dict:
     url = f"https://{ZILLOW_HOST}/priceAndTaxHistory"
     try:
@@ -123,7 +118,6 @@ async def fetch_price_and_tax_history(zpid: str) -> dict:
         return r.status_code == 200 and r.json() or {}
     except httpx.RequestError:
         return {}
-
 
 def extract_last_sale(history: dict) -> Tuple[float, str]:
     events = history.get("priceAndTaxHistory") or history.get("history") or []
@@ -134,12 +128,7 @@ def extract_last_sale(history: dict) -> Tuple[float, str]:
     return latest.get("price", 0.0), latest.get("date", "")
 
 
-def get_clean_comps(subject: dict,
-                    comps:    List[dict]
-                   ) -> Tuple[List[dict], float]:
-    """
-    Buckets by distance tiers + grade, filters to last 12-month sales only.
-    """
+def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float]:
     if not subject.get("latitude") or not subject.get("longitude"):
         return [], 0.0
 
@@ -155,7 +144,6 @@ def get_clean_comps(subject: dict,
         if not cid:
             continue
 
-        # distance
         try:
             lat2 = float(prop.get("latitude") or prop.get("location", {}).get("latitude"))
             lon2 = float(prop.get("longitude") or prop.get("location", {}).get("longitude"))
@@ -167,10 +155,10 @@ def get_clean_comps(subject: dict,
         if not grade:
             continue
 
-        # sale date
         raw = (c.get("sale") or {}).get("saleDate") or prop.get("lastSoldDate")
         if not raw:
             continue
+
         try:
             if isinstance(raw, (int, float)):
                 sd = datetime.utcfromtimestamp(raw / 1000)
@@ -187,18 +175,15 @@ def get_clean_comps(subject: dict,
             continue
 
         out.append({
-            "id":          cid,
-            "grade":       grade,
-            "distance":    round(dist, 2),
-            "sale_date":   sd.isoformat()
+            "id":        cid,
+            "grade":     grade,
+            "distance":  round(dist, 2),
+            "sale_date": sd.isoformat()
         })
 
     return out, 0.0
 
-
-async def get_comp_summary(address: str,
-                           manual_sqft: int = None
-                          ) -> Tuple[List[dict], float, int]:
+async def get_comp_summary(address: str, manual_sqft: int = None) -> Tuple[List[dict], float, int]:
     subj_ids, subject = await get_subject_data(address)
     if manual_sqft:
         subject["sqft"] = manual_sqft
@@ -207,19 +192,19 @@ async def get_comp_summary(address: str,
     if subj_ids.get("zpid"):
         raw = await fetch_zillow_comps(subj_ids["zpid"])
 
-    if not raw:
-        raw = await fetch_attom_fallback(subject)
+    # Commenting out ATTOM fallback to isolate Zillow flow
+    # if not raw:
+    #     raw = await fetch_attom_fallback(subject)
 
     if not raw:
         return [], 0.0, subject.get("sqft") or 0
 
     comps, _ = get_clean_comps(subject, raw)
 
-    # enrich with last sale price & date
     for comp in comps:
         hist = await fetch_price_and_tax_history(comp["id"])
         price, date = extract_last_sale(hist)
         comp["last_sold_price"] = price
-        comp["last_sold_date"]  = date
+        comp["last_sold_date"] = date
 
     return comps, 0.0, subject.get("sqft") or 0
