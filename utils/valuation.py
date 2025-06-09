@@ -2,7 +2,7 @@ import os
 import asyncio
 import httpx
 from haversine import haversine, Unit
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 from datetime import datetime, timedelta
 from utils.address_tools import get_coordinates
 from utils.zpid_finder import find_zpid_by_address_async
@@ -20,8 +20,8 @@ client = httpx.AsyncClient(timeout=30.0)
 
 async def get_subject_data(address: str) -> Tuple[dict, dict]:
     zpid = await find_zpid_by_address_async(address)
-    subject_info = {}
-    subj_ids = {}
+    subject_info: Dict[str, Any] = {}
+    subj_ids: Dict[str, str] = {}
 
     gmaps_info = get_coordinates(address)
     if gmaps_info:
@@ -69,6 +69,7 @@ async def fetch_zillow_comps(zpid: str) -> List[dict]:
     details = await fetch_property_details(zpid)
     if isinstance(details.get("comps"), list) and details["comps"]:
         return details.get("comps", [])
+
     url = f"https://{ZILLOW_HOST}/propertyComps"
     try:
         resp = await client.get(url, headers=Z_HEADERS, params={"zpid": zpid, "count": 20})
@@ -97,6 +98,27 @@ async def fetch_attom_comps_fallback(subject: dict, radius: int = 10, count: int
         print(f"[ERROR VAL] HTTP error on ATTOM fallback: {e}")
         return []
 
+async def fetch_price_and_tax_history(zpid: str) -> dict:
+    """Fetches full price & tax history for a property."""
+    url = f"https://{ZILLOW_HOST}/priceAndTaxHistory"
+    try:
+        resp = await client.get(url, headers=Z_HEADERS, params={"zpid": zpid})
+        return resp.status_code == 200 and resp.json() or {}
+    except httpx.RequestError:
+        return {}
+
+
+def extract_last_sale(history: dict) -> Tuple[float, str]:
+    """Returns the latest sale price and date from priceAndTaxHistory payload."""
+    # Zillow returns events under this key
+    events = history.get("priceAndTaxHistory") or history.get("history") or []
+    # filter only sale events
+    sales = [e for e in events if e.get("eventType") == "Sale"]
+    if not sales:
+        return 0.0, ""
+    latest = max(sales, key=lambda e: e.get("date", ""))
+    return latest.get("price", 0.0), latest.get("date", "")
+
 
 def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float]:
     """
@@ -109,7 +131,7 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
     s_lon = float(subject["longitude"])
     tiers = [(1, "A+"), (2, "B+"), (3, "C+"), (5, "D+"), (10, "F")]
     twelve_months_ago = datetime.now() - timedelta(days=365)
-    filtered = []
+    filtered: List[dict] = []
 
     for comp_data in comps:
         is_attom = "identifier" in comp_data
@@ -128,45 +150,37 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             continue
 
         # Determine grade by tiers
-        grade = None
-        for radius, g in tiers:
-            if distance <= radius:
-                grade = g
-                break
+        grade = next((g for r, g in tiers if distance <= r), None)
         if not grade:
             continue
 
-        # Extract and parse sale date
+        # Extract sale date
         sale_raw = (comp_data.get("sale", {}) or {}).get("saleDate") or prop.get("lastSoldDate")
-        if sale_raw is None:
+        if not sale_raw:
             continue
-        # Handle numeric timestamps (milliseconds) or strings
+        # Parse date (handles millis or ISO string)
+        sale_date = None
         if isinstance(sale_raw, (int, float)):
             try:
                 sale_date = datetime.utcfromtimestamp(sale_raw / 1000)
             except Exception:
                 continue
         else:
-            date_str = str(sale_raw)
-            # Strip trailing Z
-            if date_str.endswith("Z"):
-                date_str = date_str[:-1]
+            ds = str(sale_raw).rstrip("Z")
             try:
-                sale_date = datetime.fromisoformat(date_str)
+                sale_date = datetime.fromisoformat(ds)
             except ValueError:
                 try:
-                    sale_date = datetime.strptime(date_str[:10], "%Y-%m-%d")
+                    sale_date = datetime.strptime(ds[:10], "%Y-%m-%d")
                 except Exception:
                     continue
-
-        # Filter by last 12 months
         if sale_date < twelve_months_ago:
             continue
 
         filtered.append({
             "id": comp_id,
             "grade": grade,
-            "distance": distance,
+            "distance": round(distance, 2),
             "sale_date": sale_date.isoformat()
         })
 
@@ -177,7 +191,7 @@ async def get_comp_summary(address: str, manual_sqft: int = None) -> Tuple[List[
     if manual_sqft:
         subject["sqft"] = manual_sqft
 
-    raw_comps = []
+    raw_comps: List[dict] = []
     if subj_ids.get("zpid"):
         raw_comps = await fetch_zillow_comps(subj_ids["zpid"])
 
@@ -188,5 +202,14 @@ async def get_comp_summary(address: str, manual_sqft: int = None) -> Tuple[List[
     if not raw_comps:
         return [], 0.0, subject.get("sqft") or 0
 
+    # filter by tiers + date
     clean_comps, avg_psf = get_clean_comps(subject, raw_comps)
+
+    # enrich with last sale price
+    for comp in clean_comps:
+        history = await fetch_price_and_tax_history(comp["id"])
+        price, date = extract_last_sale(history)
+        comp["last_sold_price"] = price
+        comp["last_sold_date"] = date
+
     return clean_comps, avg_psf, subject.get("sqft") or 0
