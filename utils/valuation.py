@@ -29,7 +29,8 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
         subject_info.update({
             "latitude": gmaps_info.get("lat"),
             "longitude": gmaps_info.get("lng"),
-            "address_components": gmaps_info.get("components")
+            "address_components": gmaps_info.get("components"),
+            "address": gmaps_info.get("formatted")
         })
     else:
         return {}, {}
@@ -63,6 +64,7 @@ async def fetch_property_details(zpid: str) -> dict:
         resp = await client.get(url, headers=Z_HEADERS, params={"zpid": zpid})
         return resp.json() if resp.status_code == 200 else {}
     except httpx.RequestError: return {}
+
 
 async def fetch_zillow_comps(zpid: str) -> List[dict]:
     details = await fetch_property_details(zpid)
@@ -99,39 +101,42 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
     if not all(subject.get(k) for k in ["latitude", "longitude"]):
         return [], 0.0
 
-    s_lat, s_lon = float(subject["latitude"]), float(subject["longitude"])
-    
+    s_lat, s_lon, subject_address = float(subject["latitude"]), float(subject["longitude"]), subject.get("address")
     tiers = [(1, "A+"), (2, "B+"), (3, "C+"), (5, "D+"), (10, "F")]
     chosen = []
     chosen_ids = set()
 
-    # This loop finds the 3 closest properties and assigns a grade
-    for radius, grade in tiers:
-        if len(chosen) >= 3:
-            break
+    for comp_data in comps:
+        is_attom = "identifier" in comp_data
+        prop_details = (comp_data.get("property") or [comp_data])[0] if is_attom else comp_data
+
+        comp_id = prop_details.get("zpid") or (prop_details.get("identifier") or {}).get("attomId")
+        if not comp_id or comp_id in chosen_ids:
+            continue
         
-        for comp_data in comps:
-            if len(chosen) >= 3:
-                break
-            
-            is_attom = "identifier" in comp_data
-            prop_details = (comp_data.get("property") or [comp_data])[0] if is_attom else comp_data
+        # FIX: Filter out the subject property itself
+        comp_address_obj = prop_details.get("address", {})
+        comp_oneline_address = comp_address_obj.get("oneLine") or f"{comp_address_obj.get('line1', '')} {comp_address_obj.get('line2', '')}"
+        if subject_address and comp_oneline_address.strip().lower() == subject_address.strip().lower():
+            continue
 
-            comp_id = prop_details.get("zpid") or (prop_details.get("identifier") or {}).get("attomId")
-            if not comp_id or comp_id in chosen_ids:
-                continue
-
-            try:
-                lat2 = float(prop_details.get("latitude") or (prop_details.get("location", {}) or {}).get("latitude"))
-                lon2 = float(prop_details.get("longitude") or (prop_details.get("location", {}) or {}).get("longitude"))
-                distance = haversine((s_lat, s_lon), (lat2, lon2), unit=Unit.MILES)
-            except (ValueError, TypeError):
-                continue
+        try:
+            lat2 = float(prop_details.get("latitude") or (prop_details.get("location", {}) or {}).get("latitude"))
+            lon2 = float(prop_details.get("longitude") or (prop_details.get("location", {}) or {}).get("longitude"))
+            distance = haversine((s_lat, s_lon), (lat2, lon2), unit=Unit.MILES)
+        except (ValueError, TypeError):
+            continue
             
+        found_grade = ""
+        for radius, grade in tiers:
             if distance <= radius:
-                chosen.append({**comp_data, "id": comp_id, "grade": grade, "distance": distance})
-                chosen_ids.add(comp_id)
-    
+                found_grade = grade
+                break
+        
+        if found_grade:
+            chosen.append({**comp_data, "id": comp_id, "grade": found_grade, "distance": distance})
+            chosen_ids.add(comp_id)
+
     if not chosen:
         return [], 0.0
     
@@ -144,23 +149,21 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
         is_attom = "identifier" in comp
         prop_details = (comp.get("property") or [comp])[0] if is_attom else comp
         
-        sold = (comp.get("sale", {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice") or 0
-        sqft = (prop_details.get("building", {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea") or 0
+        # Correctly parse sale and sqft data
+        sold = (comp.get("sale", {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice")
+        sqft = (prop_details.get("building", {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea")
         
-        if sold and sqft:
-            psf = sold / sqft
-            psfs.append(psf)
-        else:
-            psf = 0
-            
+        if not sold or not sqft: continue
+
+        psf = sold / sqft
+        psfs.append(psf)
+        
         comp_address = prop_details.get("address", {})
         formatted.append({
             "address": comp_address.get("oneLine") or prop_details.get("streetAddress", "Address Not Available"),
-            "sold_price": int(sold), 
-            "sqft": int(sqft), 
-            "psf": round(psf, 2),
-            "grade": comp.get("grade", "N/A"),
-            "distance": comp.get("distance", 0.0),
+            "sold_price": int(sold), "sqft": int(sqft), "psf": round(psf, 2),
+            "grade": comp.get("grade"),
+            "distance": comp.get("distance"),
             "zillow_url": f"https://www.zillow.com/homedetails/{prop_details.get('zpid')}_zpid/" if prop_details.get('zpid') else "#"
         })
         
