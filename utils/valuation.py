@@ -101,40 +101,68 @@ async def fetch_attom_comps_fallback(subject: dict, radius: int = 5, count: int 
 
 def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float]:
     """
-    DEBUGGING VERSION: This function now has NO FILTERS. It will take the first 3
-    properties from the raw API response and format them for display.
+    DEBUGGING VERSION: This function only filters by distance tiers and grades.
     """
-    if not comps:
+    if not all(subject.get(k) for k in ["latitude", "longitude"]):
         return [], 0.0
 
-    chosen_comps = comps[:3] # Take the first 3 properties from the raw list
+    s_lat, s_lon = float(subject["latitude"]), float(subject["longitude"])
+    
+    tiers = [(1, "A+"), (2, "B+"), (3, "C+"), (5, "D+"), (10, "F")]
+    chosen = []
+    chosen_ids = set()
+
+    for radius, grade in tiers:
+        if len(chosen) >= 3:
+            break
+        
+        for comp_data in comps:
+            is_attom = "identifier" in comp_data
+            prop_details = (comp_data.get("property") or [comp_data])[0] if is_attom else comp_data
+
+            comp_id = prop_details.get("zpid") or (prop_details.get("identifier") or {}).get("attomId")
+            if not comp_id or comp_id in chosen_ids:
+                continue
+
+            try:
+                lat2 = float(prop_details.get("latitude") or (prop_details.get("location", {}) or {}).get("latitude"))
+                lon2 = float(prop_details.get("longitude") or (prop_details.get("location", {}) or {}).get("longitude"))
+            except (ValueError, TypeError):
+                continue
+            
+            distance = haversine((s_lat, s_lon), (lat2, lon2), unit=Unit.MILES)
+
+            if distance <= radius:
+                chosen.append({**comp_data, "id": comp_id, "grade": grade})
+                chosen_ids.add(comp_id)
+                if len(chosen) >= 3:
+                    break
+    
+    if not chosen:
+        return [], 0.0
 
     psfs = []
     formatted = []
-    for comp_data in chosen_comps:
-        # This logic handles the different data structures from Zillow and Attom
-        is_attom = "identifier" in comp_data
-        prop_details = (comp_data.get("property") or [comp_data])[0] if is_attom else comp_data
-
-        sale_details = comp_data.get("sale", {}).get("amount", {}) if is_attom else prop_details
-        building_details = prop_details.get("building", {})
+    for comp in chosen:
+        is_attom = "identifier" in comp
+        prop_details = (comp.get("property") or [comp])[0] if is_attom else comp
         
-        sold = sale_details.get("saleAmt") or prop_details.get("lastSoldPrice")
-        sqft = (building_details.get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea")
+        sold = (comp.get("sale", {}).get("amount", {}) or {}).get("saleAmt") or prop_details.get("lastSoldPrice") or 0
+        sqft = (prop_details.get("building", {}).get("size", {}) or {}).get("bldgsize") or prop_details.get("livingArea") or 0
         
         if sold and sqft:
             psf = sold / sqft
             psfs.append(psf)
         else:
             psf = 0
-
+            
         comp_address = prop_details.get("address", {})
         formatted.append({
             "address": comp_address.get("oneLine") or prop_details.get("streetAddress", "Address Not Available"),
-            "sold_price": int(sold) if sold else 0, 
-            "sqft": int(sqft) if sqft else 0, 
+            "sold_price": int(sold), 
+            "sqft": int(sqft), 
             "psf": round(psf, 2),
-            "grade": "N/A (Unfiltered)",
+            "grade": comp.get("grade", "N/A"),
             "zillow_url": f"https://www.zillow.com/homedetails/{prop_details.get('zpid')}_zpid/" if prop_details.get('zpid') else "#"
         })
         
