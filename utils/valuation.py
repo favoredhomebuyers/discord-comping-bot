@@ -136,17 +136,29 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
         if not grade:
             continue
 
-        # Extract sale date
-        sale_date_str = (comp_data.get("sale", {}) or {}).get("saleDate") or prop.get("lastSoldDate")
-        if not sale_date_str:
+        # Extract and parse sale date
+        sale_raw = (comp_data.get("sale", {}) or {}).get("saleDate") or prop.get("lastSoldDate")
+        if sale_raw is None:
             continue
-        try:
-            sale_date = datetime.fromisoformat(sale_date_str)
-        except ValueError:
+        # Handle numeric timestamps (milliseconds) or strings
+        if isinstance(sale_raw, (int, float)):
             try:
-                sale_date = datetime.strptime(sale_date_str[:10], "%Y-%m-%d")
+                sale_date = datetime.utcfromtimestamp(sale_raw / 1000)
             except Exception:
                 continue
+        else:
+            date_str = str(sale_raw)
+            # Strip trailing Z
+            if date_str.endswith("Z"):
+                date_str = date_str[:-1]
+            try:
+                sale_date = datetime.fromisoformat(date_str)
+            except ValueError:
+                try:
+                    sale_date = datetime.strptime(date_str[:10], "%Y-%m-%d")
+                except Exception:
+                    continue
+
         # Filter by last 12 months
         if sale_date < twelve_months_ago:
             continue
@@ -155,7 +167,7 @@ def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float
             "id": comp_id,
             "grade": grade,
             "distance": distance,
-            "sale_date": sale_date_str
+            "sale_date": sale_date.isoformat()
         })
 
     return filtered, 0.0
