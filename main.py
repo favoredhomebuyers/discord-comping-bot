@@ -74,6 +74,12 @@ async def on_message(message: discord.Message):
             await message.reply("⚠️ Something went wrong while processing comps. See logs for details.")
             return
 
+# main.py
+# ... (all imports and setup are the same) ...
+
+# Inside the on_message event:
+# ... (all logic up to building the response is the same) ...
+
     # --- 5. Assemble the Final Response ---
     main_content = (
         f"**Exit Strategies:** {exit_str}\n"
@@ -90,7 +96,11 @@ async def on_message(message: discord.Message):
     )
 
     for c in comps:
-        main_content += f"• **{c['address']}**: ${c['sold_price']:,} (${c['psf']}/sqft)\n"
+        # Add the grade and distance to the main message
+        distance_str = f"{c.get('distance', 0):.2f} mi"
+        main_content += f"• **{c['address']} [{c.get('grade')}, {distance_str}]**: ${c['sold_price']:,} (${c['psf']}/sqft)\n"
+
+    # ... (the rest of the main_content string and embed logic is the same) ...
 
     main_content += (
         f"\n**Deal Breakdowns:**\n"
