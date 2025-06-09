@@ -10,8 +10,10 @@ from datetime import datetime, timedelta
 from utils.address_tools import get_coordinates
 from utils.zpid_finder import find_zpid_by_address_async
 
+# Logger for debugging
 logger = logging.getLogger("PricingDeptBot")
 
+# --- Constants and Headers ---
 ZILLOW_HOST = os.getenv("ZILLOW_RAPIDAPI_HOST", "zillow-com1.p.rapidapi.com")
 ZILLOW_KEY  = os.getenv("ZILLOW_RAPIDAPI_KEY")
 ATTOM_HOST  = os.getenv("ATTOM_HOST",    "api.gateway.attomdata.com")
@@ -21,7 +23,6 @@ Z_HEADERS = {"x-rapidapi-host": ZILLOW_HOST, "x-rapidapi-key": ZILLOW_KEY}
 A_HEADERS = {"apikey": ATTOM_KEY}
 
 client = httpx.AsyncClient(timeout=30.0)
-
 
 async def get_subject_data(address: str) -> Tuple[dict, dict]:
     logger.info(f"[DEBUG] 🏷 Looking up ZPID for address: {address}")
@@ -61,7 +62,6 @@ async def get_subject_data(address: str) -> Tuple[dict, dict]:
 
     return subj_ids, subject_info
 
-
 async def fetch_property_details(zpid: str) -> dict:
     url = f"https://{ZILLOW_HOST}/property"
     for attempt in range(3):
@@ -75,11 +75,9 @@ async def fetch_property_details(zpid: str) -> dict:
             break
     return {}
 
-
 async def fetch_zillow_comps(zpid: str) -> List[dict]:
     """
-    Fetch comparable properties from Zillow API,
-    then dynamically extract the list of comps regardless of wrapper key.
+    Fetch comps and extract list dynamically from any wrapper key.
     """
     logger.info(f"[DEBUG] ▶️ fetch_zillow_comps called with zpid={zpid}")
     url = f"https://{ZILLOW_HOST}/propertyComps"
@@ -94,17 +92,16 @@ async def fetch_zillow_comps(zpid: str) -> List[dict]:
                 return []
 
             data = resp.json()
-            # Log the raw payload so you can inspect its structure
+            # Log raw payload
             logger.info(f"[DEBUG raw payload] {json.dumps(data, indent=2)}")
 
-            # Now extract the array of comps, whichever key it lives under:
+            # Extract comps list
             if isinstance(data, list):
                 comps = data
             else:
-                # look for common keys first
-                comps = data.get("comparables") or data.get("results")
-                # if still nothing, grab the first list we find
+                comps = data.get("comparables") or data.get("results") or data.get("list") or []
                 if not comps:
+                    # fallback: take first list value in dict
                     for v in data.values():
                         if isinstance(v, list):
                             comps = v
@@ -115,9 +112,7 @@ async def fetch_zillow_comps(zpid: str) -> List[dict]:
 
         except httpx.RequestError:
             break
-
     return []
-
 
 async def fetch_attom_fallback(subject: dict, radius: int = 10, count: int = 50) -> List[dict]:
     lat = subject.get("latitude")
@@ -144,7 +139,6 @@ async def fetch_attom_fallback(subject: dict, radius: int = 10, count: int = 50)
 
     return []
 
-
 async def fetch_price_and_tax_history(zpid: str) -> dict:
     url = f"https://{ZILLOW_HOST}/priceAndTaxHistory"
     try:
@@ -164,13 +158,76 @@ def extract_last_sale(history: dict) -> Tuple[float, str]:
 
 
 def get_clean_comps(subject: dict, comps: List[dict]) -> Tuple[List[dict], float]:
-    # (unchanged)
-    ...
+    if not subject.get("latitude") or not subject.get("longitude"):
+        return [], 0.0
+
+    s_lat = float(subject["latitude"])
+    s_lon = float(subject["longitude"])
+    tiers = [(1, "A+"), (2, "B+"), (3, "C+"), (5, "D+"), (10, "F")] 
+    cutoff = datetime.now() - timedelta(days=365)
+    filtered: List[dict] = []
+
+    for c in comps:
+        is_attom = "identifier" in c
+        prop = (c.get("property") or [c])[0] if is_attom else c
+        cid = prop.get("zpid") or (c.get("identifier") or {}).get("attomId")
+        if not cid:
+            continue
+        try:
+            lat2 = float(prop.get("latitude") or prop.get("location", {}).get("latitude"))
+            lon2 = float(prop.get("longitude") or prop.get("location", {}).get("longitude"))
+            dist = haversine((s_lat, s_lon), (lat2, lon2), unit=Unit.MILES)
+        except:
+            continue
+        grade = next((g for r, g in tiers if dist <= r), None)
+        if not grade:
+            continue
+        raw_date = (c.get("sale") or {}).get("saleDate") or prop.get("lastSoldDate")
+        if not raw_date:
+            continue
+        try:
+            if isinstance(raw_date, (int, float)):
+                sd = datetime.utcfromtimestamp(raw_date / 1000)
+            else:
+                ds = str(raw_date).rstrip("Z")
+                try:
+                    sd = datetime.fromisoformat(ds)
+                except:
+                    sd = datetime.strptime(ds[:10], "%Y-%m-%d")
+        except:
+            continue
+        if sd < cutoff:
+            continue
+        filtered.append({
+            "id":        cid,
+            "grade":     grade,
+            "distance":  round(dist, 2),
+            "sale_date": sd.isoformat(),
+        })
+    return filtered, 0.0
+
 
 async def get_comp_summary_by_zpid(
     zpid: str,
     subject: dict,
     manual_sqft: Optional[int] = None
 ) -> Tuple[List[dict], float, int]:
-    # (unchanged)
-    ...
+    if manual_sqft:
+        subject["sqft"] = manual_sqft
+
+    raw = await fetch_zillow_comps(zpid)
+    if not raw:
+        raw = []  # ATTOM fallback disabled
+
+    if not raw:
+        return [], 0.0, subject.get("sqft") or 0
+
+    comps, _ = get_clean_comps(subject, raw)
+
+    for comp in comps:
+        history = await fetch_price_and_tax_history(comp["id"])
+        price, date = extract_last_sale(history)
+        comp["last_sold_price"] = price
+        comp["last_sold_date"]  = date
+
+    return comps, 0.0, subject.get("sqft") or 0
