@@ -1,6 +1,6 @@
+# utils/zpid_finder.py
 import os
 import httpx
-import json
 from typing import Optional
 
 # must match your ZILLOW_HOST and Z_HEADERS in valuation.py
@@ -22,11 +22,11 @@ async def find_zpid_by_address_async(address: str) -> Optional[str]:
             print(f"[ERROR ZPID] propertyExtendedSearch status {resp.status_code}")
             return None
         data = resp.json()
-        # Debug: log keys
+        # Debug: inspect top-level keys
         print(f"[DEBUG ZPID] response keys: {list(data.keys())}")
-        # Try known container keys
-        hits = data.get("results") or data.get("list") or data.get("props") or []
-        # Some payloads nest under props.list
+        # Try common result containers
+        hits = data.get("results") or data.get("list") or []
+        # Some versions nest under props.list
         if not hits and isinstance(data.get("props"), dict):
             hits = data["props"].get("list", [])
         if hits:
